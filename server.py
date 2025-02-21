@@ -1,12 +1,12 @@
 import asyncio
+import io
+import keyword
+import logging
 import mimetypes
 import pathlib
-import logging
 import re
-import io
-import tokenize
 import token
-import keyword
+import tokenize
 from urllib.parse import unquote
 
 # Configure logging
@@ -20,65 +20,88 @@ ROOT = pathlib.Path(__file__).parent.resolve()
 ALLOWED_METHODS = {"GET", "HEAD"}
 BUFFER_SIZE = 1024
 MAX_HEADER_SIZE = 8192  # 8KB
+KB = 1024
 
 
 def highlight_python_code(code: str) -> str:
-    """
-    Very basic syntax highlighter for Python code using built-in modules.
-    It wraps Python keywords, strings, numbers, and comments in span tags with classes.
+    """Highlight basic Python syntax while preserving original spacing.
+
+    Uses token position info (start_row, start_col, end_row, end_col)
+    to reconstruct the original layout.
     """
     result = []
-    try:
-        tokens = tokenize.generate_tokens(io.StringIO(code).readline)
-        for tok in tokens:
-            t_type, t_string, _, _, _ = tok
-            # Assign a CSS class based on token type.
-            if t_type == token.STRING:
-                result.append(f'<span class="string">{t_string}</span>')
-            elif t_type == token.NUMBER:
-                result.append(f'<span class="number">{t_string}</span>')
-            elif t_type == token.COMMENT:
-                result.append(f'<span class="comment">{t_string}</span>')
-            elif t_type == token.NAME and t_string in keyword.kwlist:
-                result.append(f'<span class="keyword">{t_string}</span>')
-            else:
-                result.append(t_string)
-    except Exception:
-        # In case of any error, fall back to unhighlighted code.
-        return code
+    tokens = list(tokenize.generate_tokens(io.StringIO(code).readline))
+
+    # Track the previous token's end position so we can
+    # insert the appropriate number of spaces/newlines.
+    prev_row, prev_col = 1, 0
+
+    for t_type, t_string, (start_row, start_col), (end_row, end_col), _ in tokens:
+        # Insert newlines if we jumped to a new row.
+        while prev_row < start_row:
+            result.append("\n")
+            prev_row += 1
+            prev_col = 0
+
+        # Insert spaces if we jumped columns in the same row.
+        while prev_col < start_col:
+            result.append(" ")
+            prev_col += 1
+
+        # Highlight based on token type.
+        if t_type == token.STRING:
+            result.append(f'<span class="string">{t_string}</span>')
+        elif t_type == token.NUMBER:
+            result.append(f'<span class="number">{t_string}</span>')
+        elif t_type == token.COMMENT:
+            result.append(f'<span class="comment">{t_string}</span>')
+        elif t_type == token.NAME and t_string in keyword.kwlist:
+            result.append(f'<span class="keyword">{t_string}</span>')
+        else:
+            result.append(t_string)
+
+        # Update previous token position to this token's end.
+        prev_row, prev_col = end_row, end_col
+
     return "".join(result)
 
 
 def render_markdown(markdown_text: str) -> str:
-    """
-    Convert a Markdown string to HTML with basic formatting.
-    In addition to headings, bold, italics, inline code, and links,
-    this function processes code blocks. If a code block specifies a language
-    (e.g. "```python"), then for Python code a simple highlighter is applied.
+    """Convert a Markdown string to HTML using only built-in libraries.
+
+    Features supported:
+      - Headings (using 1-6 '#' characters)
+      - Bold (**text**) and italics (*text*)
+      - Inline code (`code`)
+      - Links ([text](url))
+      - Unordered lists (lines starting with "- ")
+      - Blockquotes (lines starting with "> ")
+      - Code blocks (```), with basic Python syntax highlighting if language is 'python'
     """
     lines = markdown_text.splitlines()
     html_lines = []
     in_code_block = False
+    in_list = False
     code_block = []
+    list_buffer = []
     code_lang = ""
 
     for line in lines:
-        # Detect code block start/end
+        # Handle code block start/end.
         if line.startswith("```"):
             match = re.match(r"^```(\w+)?", line)
-            lang = match.group(1) if match and match.group(1) else ""
+            lang = match.group(1).lower() if match and match.group(1) else ""
             if not in_code_block:
                 in_code_block = True
                 code_block = []
-                code_lang = lang.lower()
+                code_lang = lang
             else:
                 in_code_block = False
                 code_content = "\n".join(code_block)
                 if code_lang == "python":
                     code_content = highlight_python_code(code_content)
-                # Wrap in <pre><code> with an optional language class.
                 html_lines.append(
-                    f'<pre><code class="language-{code_lang}">{code_content}</code></pre>'
+                    f'<pre><code class="language-{code_lang}">{code_content}</code></pre>',
                 )
             continue
 
@@ -86,50 +109,112 @@ def render_markdown(markdown_text: str) -> str:
             code_block.append(line)
             continue
 
-        # Headings: from "# " to "###### "
+        # Detect horizontal rule (thematic break): --- *** ___ etc.
+        hr_match = re.match(r"^\s*(\*|-|_){3,}\s*$", line)
+        if hr_match:
+            html_lines.append("<hr/>")
+            continue
+
+        # Handle headings.
         header_match = re.match(r"^(#{1,6})\s+(.*)", line)
         if header_match:
             level = len(header_match.group(1))
             content = header_match.group(2)
             html_lines.append(f"<h{level}>{content}</h{level}>")
+            continue
+
+        # Handle unordered list items.
+        if line.startswith("- "):
+            if not in_list:
+                in_list = True
+                list_buffer = []
+            list_item = line[2:].strip()
+            list_buffer.append(f"<li>{list_item}</li>")
+            continue
+        if in_list:
+            html_lines.append("<ul>" + "".join(list_buffer) + "</ul>")
+            in_list = False
+            list_buffer = []
+
+        # Handle blockquotes.
+        if line.startswith("> "):
+            blockquote_line = line[2:].strip()
+            html_lines.append(f"<blockquote>{blockquote_line}</blockquote>")
+            continue
+
+        # Inline formatting: bold, italics, inline code, and links.
+        line = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", line)
+        line = re.sub(r"\*(.+?)\*", r"<em>\1</em>", line)
+        line = re.sub(r"`(.+?)`", r"<code>\1</code>", line)
+        line = re.sub(r"\[(.*?)\]\((.*?)\)", r'<a href="\2">\1</a>', line)
+
+        if line.strip():
+            html_lines.append(f"<p>{line}</p>")
         else:
-            # Inline formatting:
-            # Bold: **text**
-            line = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", line)
-            # Italic: *text*
-            line = re.sub(r"\*(.+?)\*", r"<em>\1</em>", line)
-            # Inline code: `code`
-            line = re.sub(r"`(.+?)`", r"<code>\1</code>", line)
-            # Links: [text](url)
-            line = re.sub(r"\[(.*?)\]\((.*?)\)", r'<a href="\2">\1</a>', line)
-            if line.strip():
-                html_lines.append(f"<p>{line}</p>")
-            else:
-                html_lines.append("")
+            html_lines.append("")
+
+    # Flush any remaining list items.
+    if in_list:
+        html_lines.append("<ul>" + "".join(list_buffer) + "</ul>")
 
     converted = "\n".join(html_lines)
     # CSS styles for Markdown and code highlighting.
     style = """
     <style>
-        body { font-family: sans-serif; margin: 2rem; }
+        /* Material-inspired fonts (uses system sans if Roboto is not loaded) */
+        body {
+            font-family: "Roboto", sans-serif;
+            background-color: #fafafa;
+            margin: 2rem;
+            color: #212121;
+        }
+        h1, h2, h3, h4, h5, h6 {
+            color: #3f51b5; /* Material Indigo */
+            margin-bottom: 0.5rem;
+        }
+        p, li, blockquote {
+            line-height: 1.6;
+        }
         pre code {
-            background-color: #f6f8fa;
+            background-color: #ffffff;
             padding: 1em;
             display: block;
             overflow-x: auto;
-            font-family: monospace;
+            font-family: "Roboto Mono", monospace;
+            border-radius: 4px;
+            border: 1px solid #e0e0e0;
+            margin: 1em 0;
         }
-        span.keyword { color: #d73a49; font-weight: bold; }
-        span.string { color: #032f62; }
-        span.number { color: #005cc5; }
-        span.comment { color: #6a737d; font-style: italic; }
+        a {
+            color: #1e88e5; /* Material Blue */
+            text-decoration: none;
+        }
+        a:hover {
+            text-decoration: underline;
+        }
+        blockquote {
+            border-left: 4px solid #3f51b5;
+            background-color: #e8eaf6;
+            margin: 1em 0;
+            padding: 0.5em 1em;
+            border-radius: 4px;
+            color: #3f51b5;
+        }
+        /* Syntax highlighting classes */
+        span.keyword { color: #d81b60; font-weight: 500; } /* Pink 600 */
+        span.string  { color: #388e3c; }                   /* Green 700 */
+        span.number  { color: #f57c00; }                   /* Orange 600 */
+        span.comment { color: #757575; font-style: italic;} /* Grey 600 */
     </style>
     """
     return (
         "<!DOCTYPE html>"
         "<html lang='en'>"
-        "<head><meta charset='utf-8'><title>Markdown Render</title>" + style + "</head>"
-        f"<body>{converted}</body></html>"
+        "<head><meta charset='utf-8'><title>Markdown Render</title>"
+        + style
+        + "</head><body>"
+        + converted
+        + "</body></html>"
     )
 
 
@@ -143,7 +228,8 @@ async def read_headers(reader: asyncio.StreamReader) -> str:
             break
         total_size += len(line)
         if total_size > MAX_HEADER_SIZE:
-            raise ValueError("Header size exceeds maximum allowed")
+            msg = "Header size exceeds maximum allowed"
+            raise ValueError(msg)
         if line == b"\r\n":  # End of headers
             break
         headers.append(line.decode("utf-8", "ignore"))
@@ -153,30 +239,32 @@ async def read_headers(reader: asyncio.StreamReader) -> str:
 def parse_request(req: str) -> dict:
     """Parse HTTP request into structured data."""
     if not req:
-        raise ValueError("Empty request")
+        msg = "Empty request"
+        raise ValueError(msg)
 
     lines = req.strip().splitlines()
     if not lines:
-        raise ValueError("Malformed request")
+        msg = "Malformed request"
+        raise ValueError(msg)
 
-    # Parse request line.
+    # Parse request line
     try:
         method, path, http_version = lines[0].split(maxsplit=2)
     except ValueError:
-        raise ValueError("Invalid request line") from None
+        msg = "Invalid request line"
+        raise ValueError(msg) from None
 
-    # Normalize path.
-    path = unquote(path)  # URL decode path.
-    if "?" in path:  # Remove query parameters.
+    # Normalize path
+    path = unquote(path)  # URL decode path
+    if "?" in path:  # Remove query parameters
         path = path.split("?", 1)[0]
 
-    # Preserve root path as "/".
-    if path == "/":
-        path = "/"
-    else:
-        path = path.lstrip("/")  # Remove leading slashes but preserve trailing.
+    # Preserve root path as "/"
+    path = (
+        path if path == "/" else path.lstrip("/")
+    )  # Remove leading slashes but preserve trailing
 
-    # Parse headers.
+    # Parse headers
     headers = {}
     for line in lines[1:]:
         if not line:
@@ -203,7 +291,7 @@ def validate_path(request_path: str) -> pathlib.Path:
         logger.warning("Path resolution error: %s", e)
         return None
 
-    # Prevent directory traversal.
+    # Prevent directory traversal
     if not requested.is_relative_to(ROOT):
         logger.warning("Directory traversal attempt: %s", request_path)
         return None
@@ -225,9 +313,15 @@ def generate_directory_listing(path: pathlib.Path) -> bytes:
         if item.is_dir():
             items.append(f'<li><a href="/{rel_path}/">{item.name}/</a></li>')
         else:
+            size = item.stat().st_size
+            if size < KB:
+                formatted_size = f"{size} B"
+            elif size < KB**2:
+                formatted_size = f"{size / KB:.2f} KB"
+            else:
+                formatted_size = f"{size / KB**2:.2f} MB"
             items.append(
-                f'<li><a href="/{rel_path}">{item.name}</a>'
-                f" ({item.stat().st_size // 1024} KB)</li>"
+                f'<li><a href="/{rel_path}">{item.name}</a> ({formatted_size})</li>',
             )
 
     html = f"""
@@ -264,8 +358,9 @@ def generate_directory_listing(path: pathlib.Path) -> bytes:
 def create_response(
     request: dict,
     content: bytes,
+    *,
     is_directory: bool = False,
-    override_content_type: str = None,
+    override_content_type: str | None = None,
 ) -> tuple:
     """Create HTTP response with headers."""
     logger.debug("Request: %s", request)
@@ -281,7 +376,7 @@ def create_response(
     elif is_directory:
         content_type = "text/html; charset=utf-8"
     else:
-        # Determine MIME type and set charset for text files.
+        # Determine MIME type and set charset for text files
         mime_type, _ = mimetypes.guess_type(request["path"])
         content_type = mime_type or "application/octet-stream"
         if content_type.startswith("text/"):
@@ -291,20 +386,23 @@ def create_response(
         {
             "Content-Type": content_type,
             "Content-Length": str(len(content)),
-        }
+        },
     )
 
     header_lines = "\r\n".join(f"{k}: {v}" for k, v in headers.items())
-    return f"{status_line}\r\n{header_lines}\r\n\r\n".encode("utf-8"), content
+    return f"{status_line}\r\n{header_lines}\r\n\r\n".encode(), content
 
 
-async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+async def handle_client(
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+) -> None:
     """Handle client connection."""
     client_ip = writer.get_extra_info("peername")[0]
     logger.info("New connection from %s", client_ip)
 
     try:
-        # Read and parse headers.
+        # Read and parse headers
         try:
             raw_headers = await read_headers(reader)
         except ValueError as e:
@@ -325,7 +423,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
 
         logger.info("%s %s", request["method"], request["path"])
 
-        # Validate request.
+        # Validate request
         if request["method"] not in ALLOWED_METHODS:
             response = b"HTTP/1.1 405 Method Not Allowed\r\nAllow: GET, HEAD\r\n\r\n"
         else:
@@ -333,7 +431,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             if not resolved_path:
                 response = b"HTTP/1.1 404 Not Found\r\n\r\n"
             else:
-                # Handle directory redirection.
+                # Handle directory redirection
                 is_directory = resolved_path.is_dir()
                 request_path = request["path"]
 
@@ -347,18 +445,20 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                             f"{request['version']} 301 Moved Permanently\r\n"
                             f"Location: {redirect_path}\r\n"
                             "Connection: close\r\n\r\n"
-                        ).encode("utf-8")
+                        ).encode()
                     else:
                         content = generate_directory_listing(resolved_path)
                         headers, body = create_response(
-                            request, content, is_directory=True
+                            request,
+                            content,
+                            is_directory=True,
                         )
                         response = headers + (
                             b"" if request["method"] == "HEAD" else body
                         )
                 else:
                     try:
-                        # If the requested file is Markdown, render it to HTML.
+                        # If the requested file is Markdown, render it to HTML
                         if resolved_path.suffix.lower() == ".md":
                             md_text = resolved_path.read_text(encoding="utf-8")
                             rendered_html = render_markdown(md_text)
@@ -368,8 +468,8 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                     except PermissionError as e:
                         logger.warning("Permission denied: %s", e)
                         response = b"HTTP/1.1 403 Forbidden\r\n\r\n"
-                    except Exception as e:
-                        logger.error("File read error: %s", e)
+                    except Exception:
+                        logger.exception("File read error")
                         response = b"HTTP/1.1 500 Internal Server Error\r\n\r\n"
                     else:
                         if resolved_path.suffix.lower() == ".md":
@@ -384,19 +484,19 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                             b"" if request["method"] == "HEAD" else body
                         )
 
-        # Send response.
+        # Send response
         writer.write(response)
         await writer.drain()
 
-    except Exception as e:
-        logger.error("Error handling request: %s", e, exc_info=True)
+    except Exception:
+        logger.exception("Error handling request")
     finally:
         writer.close()
         await writer.wait_closed()
         logger.info("Connection closed: %s", client_ip)
 
 
-async def run_server(host: str = "0.0.0.0", port: int = 9000):
+async def run_server(host: str = "0.0.0.0", port: int = 9000) -> None:
     """Start the async HTTP server."""
     server = await asyncio.start_server(handle_client, host, port)
     async with server:
