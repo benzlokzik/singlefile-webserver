@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 from urllib.parse import unquote
 
 if TYPE_CHECKING:
-    from abc import Iterable
+    from collections.abc import Iterable
 
 # Configure logging
 logging.basicConfig(
@@ -367,7 +367,7 @@ def create_response(
     *,
     is_directory: bool = False,
     override_content_type: str | None = None,
-) -> tuple:
+) -> tuple[bytes, bytes]:
     """Create HTTP response with headers."""
     logger.debug("Request: %s", request)
     status_line = f"{request['version']} 200 OK"
@@ -530,7 +530,7 @@ async def test_server_availability(port: int) -> None:
         await ping_server(test_host, port)
 
 
-async def attempt_server(port: int, host: str) -> tuple:
+async def attempt_server(port: int, host: str) -> tuple[int, asyncio.AbstractServer]:
     """Try to bind the server on the given port, perform the ping tests, and return the port and server.
     Raises OSError if binding or ping test fails.
     """
