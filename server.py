@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 import io
 import keyword
@@ -7,7 +9,11 @@ import pathlib
 import re
 import token
 import tokenize
+from typing import TYPE_CHECKING
 from urllib.parse import unquote
+
+if TYPE_CHECKING:
+    from abc import Iterable
 
 # Configure logging
 logging.basicConfig(
@@ -496,17 +502,101 @@ async def handle_client(
         logger.info("Connection closed: %s", client_ip)
 
 
-async def run_server(host: str = "0.0.0.0", port: int = 9000) -> None:
-    """Start the async HTTP server."""
-    server = await asyncio.start_server(handle_client, host, port)
-    async with server:
-        logger.info("Server started on http://%s:%d", host, port)
-        await server.serve_forever()
+async def ping_server(host: str, port: int) -> None:
+    """Test the server availability by sending a simple HTTP GET request.
+    Raises OSError if the connection fails or no data is received.
+    """
+    try:
+        reader, writer = await asyncio.open_connection(host, port)
+        # Sending a minimal HTTP request
+        writer.write(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        await writer.drain()
+        response = await reader.read(1024)
+        if not response:
+            msg = f"No response received from {host}:{port}"
+            raise OSError(msg)
+        writer.close()
+        await writer.wait_closed()
+    except Exception as e:
+        msg = f"Ping failed for {host}:{port} - {e}"
+        raise OSError(msg) from e
+
+
+async def test_server_availability(port: int) -> None:
+    """Test the server availability on both 127.0.0.1 and 0.0.0.0.
+    Raises OSError if any of the pings fails.
+    """
+    for test_host in ("127.0.0.1", "0.0.0.0"):
+        await ping_server(test_host, port)
+
+
+async def attempt_server(port: int, host: str) -> tuple:
+    """Try to bind the server on the given port, perform the ping tests, and return the port and server.
+    Raises OSError if binding or ping test fails.
+    """
+    try:
+        server = await asyncio.start_server(handle_client, host, port)
+    except OSError as e:
+        msg = f"Port {port} is not available: {e}"
+        raise OSError(msg)
+
+    # Test server availability on both 127.0.0.1 and 0.0.0.0.
+    try:
+        await test_server_availability(port)
+    except OSError as e:
+        server.close()
+        await server.wait_closed()
+        msg = f"Ping test failed on port {port}: {e}"
+        raise OSError(msg)
+
+    return port, server
+
+
+async def run_server_on_available_port(
+    host: str = "0.0.0.0",
+    ports: Iterable[int] = (9000,),
+) -> None:
+    """Attempt to start servers on multiple ports concurrently.
+    Use the first one that passes the ping tests and cancel the rest.
+    """
+    tasks = [asyncio.create_task(attempt_server(port, host)) for port in ports]
+
+    for completed in asyncio.as_completed(tasks):
+        try:
+            port, server = await completed
+            logger.info(
+                "Server started and passed ping tests on http://%s:%s",
+                host,
+                port,
+            )
+            # Cancel any other pending tasks.
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            # Start serving on the successful server.
+            async with server:
+                await server.serve_forever()
+            return
+        except Exception as e:
+            logger.warning("Attempt failed: %s", e)
+
+    logger.error("No available ports found that passed ping tests. Exiting.")
 
 
 if __name__ == "__main__":
     mimetypes.init()
     try:
-        asyncio.run(run_server())
+        asyncio.run(
+            run_server_on_available_port(
+                ports=(
+                    9000,
+                    9001,
+                    9002,
+                    9003,
+                    9004,
+                    9005,
+                ),
+            ),
+        )
     except KeyboardInterrupt:
         logger.info("Server stopped")
