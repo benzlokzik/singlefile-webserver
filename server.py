@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+from datetime import datetime
 import keyword
 import logging
 import mimetypes
@@ -27,6 +28,15 @@ ALLOWED_METHODS = {"GET", "HEAD"}
 BUFFER_SIZE = 1024
 MAX_HEADER_SIZE = 8192  # 8KB
 KB = 1024
+
+
+def format_size(size: int) -> str:
+    if size < KB:
+        return f"{size} B"
+    elif size < KB**2:
+        return f"{size / KB:.2f} KB"
+    else:
+        return f"{size / KB**2:.2f} MB"
 
 
 def highlight_python_code(code: str) -> str:
@@ -77,151 +87,149 @@ def render_markdown(markdown_text: str) -> str:
 
     Features supported:
       - Headings (using 1-6 '#' characters)
-      - Bold (**text**) and italics (*text*)
+      - Bold/Italic (**text**, *text*)
       - Inline code (`code`)
       - Links ([text](url))
-      - Unordered lists (lines starting with "- ")
-      - Blockquotes (lines starting with "> ")
-      - Code blocks (```), with basic Python syntax highlighting if language is 'python'
+      - Reference-style links/images: [text][id], ![alt][id] with [id]: url
+      - Images ![alt](src)
+      - Image-as-link: [![alt](src)](href)
+      - Lists (- ), blockquotes (> ), code fences ```lang (python gets basic highlighting)
     """
-    lines = markdown_text.splitlines()
+    # Collect reference-style link definitions
+    ref_links: dict[str, str] = {}
+    raw_lines = markdown_text.splitlines()
+    lines = []
+    for line in raw_lines:
+        m = re.match(r"^\s*\[([^\]]+)\]:\s*(\S+)", line)
+        if m:
+            ref_links[m.group(1).strip()] = m.group(2).strip()
+        else:
+            lines.append(line)
+
     html_lines = []
     in_code_block = False
-    in_list = False
-    code_block = []
-    list_buffer = []
     code_lang = ""
+    code_block: list[str] = []
+    in_list = False
+    list_buffer: list[str] = []
+
+    fence_re = re.compile(
+        r"^\s*(```|~~~)\s*([A-Za-z0-9_+-]+)?\s*$"
+    )  # allow leading spaces + ~~~
+    fence_close_re = re.compile(r"^\s*(```|~~~)\s*$")
 
     for line in lines:
-        # Handle code block start/end.
-        if line.startswith("```"):
-            match = re.match(r"^```(\w+)?", line)
-            lang = match.group(1).lower() if match and match.group(1) else ""
-            if not in_code_block:
-                in_code_block = True
-                code_block = []
-                code_lang = lang
-            else:
-                in_code_block = False
-                code_content = "\n".join(code_block)
-                if code_lang == "python":
-                    code_content = highlight_python_code(code_content)
-                html_lines.append(
-                    f'<pre><code class="language-{code_lang}">{code_content}</code></pre>',
-                )
+        # Code block start/end
+        m_start = fence_re.match(line)
+        if m_start and not in_code_block:
+            in_code_block = True
+            code_lang = (m_start.group(2) or "").lower()
+            code_block = []
+            continue
+        if fence_close_re.match(line) and in_code_block:
+            in_code_block = False
+            code_content = "\n".join(code_block)
+            if code_lang == "python":
+                code_content = highlight_python_code(code_content)
+            html_lines.append(
+                f'<pre><code class="language-{code_lang}">{code_content}</code></pre>'
+            )
             continue
 
         if in_code_block:
             code_block.append(line)
             continue
 
-        # Detect horizontal rule (thematic break): --- *** ___ etc.
-        hr_match = re.match(r"^\s*(\*|-|_){3,}\s*$", line)
-        if hr_match:
+        # horizontal rule
+        if re.match(r"^\s*(\*|-|_){3,}\s*$", line):
+            if in_list:
+                html_lines.append("<ul>" + "".join(list_buffer) + "</ul>")
+                in_list = False
+                list_buffer = []
             html_lines.append("<hr/>")
             continue
 
-        # Handle headings.
-        header_match = re.match(r"^(#{1,6})\s+(.*)", line)
-        if header_match:
-            level = len(header_match.group(1))
-            content = header_match.group(2)
-            html_lines.append(f"<h{level}>{content}</h{level}>")
+        # headings
+        m_h = re.match(r"^(#{1,6})\s+(.*)", line)
+        if m_h:
+            if in_list:
+                html_lines.append("<ul>" + "".join(list_buffer) + "</ul>")
+                in_list = False
+                list_buffer = []
+            lvl = len(m_h.group(1))
+            content = m_h.group(2)
+            html_lines.append(f"<h{lvl}>{content}</h{lvl}>")
             continue
 
-        # Handle unordered list items.
+        # unordered lists
         if line.startswith("- "):
             if not in_list:
                 in_list = True
                 list_buffer = []
-            list_item = line[2:].strip()
-            list_buffer.append(f"<li>{list_item}</li>")
+            list_buffer.append(f"<li>{line[2:].strip()}</li>")
             continue
         if in_list:
             html_lines.append("<ul>" + "".join(list_buffer) + "</ul>")
             in_list = False
             list_buffer = []
 
-        # Handle blockquotes.
+        # blockquotes
         if line.startswith("> "):
-            blockquote_line = line[2:].strip()
-            html_lines.append(f"<blockquote>{blockquote_line}</blockquote>")
+            html_lines.append(f"<blockquote>{line[2:].strip()}</blockquote>")
             continue
 
-        # Inline formatting: bold, italics, inline code, and links.
+        # inline transforms — order matters
+        # code
+        line = re.sub(r"`([^`]+?)`", r"<code>\1</code>", line)
+
+        # image-as-link: [![alt](src)](href)
+        line = re.sub(
+            r"\[\s*!\[([^\]]*?)\]\(([^)]+)\)\s*\]\(([^)]+)\)",
+            r'<a href="\3"><img alt="\1" src="\2" /></a>',
+            line,
+        )
+
+        # reference-style images/links
+        line = re.sub(
+            r"!\[([^\]]*?)\]\[([^\]]+)\]",
+            lambda m: f'<img alt="{m.group(1)}" src="{ref_links.get(m.group(2), m.group(2))}" />',
+            line,
+        )
+        line = re.sub(
+            r"\[([^\]]+)\]\[([^\]]+)\]",
+            lambda m: f'<a href="{ref_links.get(m.group(2), m.group(2))}">{m.group(1)}</a>',
+            line,
+        )
+
+        # inline images / links
+        line = re.sub(r"!\[([^\]]*?)\]\(([^)]+)\)", r'<img alt="\1" src="\2" />', line)
+        line = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r'<a href="\2">\1</a>', line)
+
+        # emphasis
         line = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", line)
         line = re.sub(r"\*(.+?)\*", r"<em>\1</em>", line)
-        line = re.sub(r"`(.+?)`", r"<code>\1</code>", line)
-        line = re.sub(r"\[(.*?)\]\((.*?)\)", r'<a href="\2">\1</a>', line)
 
         if line.strip():
             html_lines.append(f"<p>{line}</p>")
         else:
             html_lines.append("")
 
-    # Flush any remaining list items.
+    # flush any remaining list items
     if in_list:
         html_lines.append("<ul>" + "".join(list_buffer) + "</ul>")
 
     converted = "\n".join(html_lines)
-    # CSS styles for Markdown and code highlighting.
-    style = """
-    <style>
-        /* Material-inspired fonts (uses system sans if Roboto is not loaded) */
-        body {
-            font-family: "Roboto", sans-serif;
-            background-color: #fafafa;
-            margin: 2rem;
-            color: #212121;
-        }
-        h1, h2, h3, h4, h5, h6 {
-            color: #3f51b5; /* Material Indigo */
-            margin-bottom: 0.5rem;
-        }
-        p, li, blockquote {
-            line-height: 1.6;
-        }
-        pre code {
-            background-color: #ffffff;
-            padding: 1em;
-            display: block;
-            overflow-x: auto;
-            font-family: "Roboto Mono", monospace;
-            border-radius: 4px;
-            border: 1px solid #e0e0e0;
-            margin: 1em 0;
-        }
-        a {
-            color: #1e88e5; /* Material Blue */
-            text-decoration: none;
-        }
-        a:hover {
-            text-decoration: underline;
-        }
-        blockquote {
-            border-left: 4px solid #3f51b5;
-            background-color: #e8eaf6;
-            margin: 1em 0;
-            padding: 0.5em 1em;
-            border-radius: 4px;
-            color: #3f51b5;
-        }
-        /* Syntax highlighting classes */
-        span.keyword { color: #d81b60; font-weight: 500; } /* Pink 600 */
-        span.string  { color: #388e3c; }                   /* Green 700 */
-        span.number  { color: #f57c00; }                   /* Orange 600 */
-        span.comment { color: #757575; font-style: italic;} /* Grey 600 */
-    </style>
+
+    body = f"""
+    <div class="card">
+      <h2>Markdown</h2>
+      <div style="padding:16px">{converted}</div>
+    </div>
     """
-    return (
-        "<!DOCTYPE html>"
-        "<html lang='en'>"
-        "<head><meta charset='utf-8'><title>Markdown Render</title>"
-        + style
-        + "</head><body>"
-        + converted
-        + "</body></html>"
-    )
+
+    # breadcrumbs for the file path are drawn on the directory listing side
+    # here we leave it empty but the header remains the same
+    return render_page("Markdown Render", body)
 
 
 async def read_headers(reader: asyncio.StreamReader) -> str:
@@ -306,59 +314,357 @@ def validate_path(request_path: str) -> pathlib.Path:
 
 
 def generate_directory_listing(path: pathlib.Path) -> bytes:
-    """Generate HTML directory listing."""
-    items = []
-    current_rel = path.relative_to(ROOT)
+    rel = path.relative_to(ROOT) if path != ROOT else pathlib.Path("")
 
+    # Build rows
+    rows = []
+
+    # Parent always on top (separate class + excluded from sorting/filter)
     if path != ROOT:
-        parent = path.parent.relative_to(ROOT)
-        items.append(f'<li><a href="/{parent}/">.. (Parent Directory)</a></li>')
+        parent_rel = path.parent.relative_to(ROOT)
+        rows.append(f"""
+          <tr class="parent-row" data-name=".." data-size="0" data-ts="{int(path.stat().st_mtime)}" data-isdir="1" data-parent="1">
+            <td class="name-col">
+              <span class="icon"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M10 4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H4a2 2 0 01-2-2V6a2 2 0 012-2h6z"/></svg></span>
+              <a href="/{parent_rel}/">..</a>
+              <span class="meta">Parent</span>
+            </td>
+            <td class="meta">—</td>
+            <td class="meta">—</td>
+          </tr>
+        """)
 
-    for item in sorted(path.iterdir(), key=lambda x: (not x.is_dir(), x.name)):
-        rel_path = item.relative_to(ROOT)
-        if item.is_dir():
-            items.append(f'<li><a href="/{rel_path}/">{item.name}/</a></li>')
-        else:
-            size = item.stat().st_size
-            if size < KB:
-                formatted_size = f"{size} B"
-            elif size < KB**2:
-                formatted_size = f"{size / KB:.2f} KB"
-            else:
-                formatted_size = f"{size / KB**2:.2f} MB"
-            items.append(
-                f'<li><a href="/{rel_path}">{item.name}</a> ({formatted_size})</li>',
-            )
+    for item in sorted(path.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())):
+        is_dir = item.is_dir()
+        rel_item = item.relative_to(ROOT)
+        href = f"/{rel_item}/" if is_dir else f"/{rel_item}"
+        size = item.stat().st_size if not is_dir else 0
+        mtime = int(item.stat().st_mtime)
+        size_str = "—" if is_dir else format_size(size)
+        mod_str = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+        icon = (
+            """
+          <span class="icon"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M10 4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H4a2 2 0 01-2-2V6a2 2 0 012-2h6z"/></svg></span>
+        """
+            if is_dir
+            else """
+          <span class="icon"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6zM14 3.5L18.5 8H14V3.5z"/></svg></span>
+        """
+        )
+        rows.append(f"""
+          <tr data-name="{item.name}" data-size="{size}" data-ts="{mtime}" data-isdir="{1 if is_dir else 0}">
+            <td class="name-col">{icon}<a class="file-link" href="{href}">{item.name}{'/' if is_dir else ''}</a></td>
+            <td class="meta">{size_str}</td>
+            <td class="meta">{mod_str}</td>
+          </tr>
+        """)
 
-    html = f"""
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <title>Directory listing for /{current_rel}</title>
-        <style>
-            body {{ font-family: sans-serif; margin: 2rem; }}
-            ul {{ list-style-type: none; padding: 0; }}
-            li {{ padding: 0.5rem; }}
-            a {{ color: #0366d6; text-decoration: none; }}
-            a:hover {{ text-decoration: underline; }}
-            .container {{ max-width: 800px; margin: 0 auto; }}
-            .header {{ border-bottom: 1px solid #eaecef; margin-bottom: 1rem; }}
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <div class="header">
-                <h1>Directory listing for /{current_rel}</h1>
-            </div>
-            <ul>
-                {"".join(items)}
-            </ul>
+    table = f"""
+    <div class="main">
+      <div class="card">
+        <h2>Contents</h2>
+        <div class="table-wrap">
+          <table id="files">
+            <thead>
+              <tr>
+                <th data-key="name">Name</th>
+                <th data-key="size">Size</th>
+                <th data-key="ts">Modified</th>
+              </tr>
+            </thead>
+            <tbody>
+              {''.join(rows)}
+            </tbody>
+          </table>
         </div>
-    </body>
-    </html>
+        <div style="padding:10px 12px" class="meta"><span id="count"></span></div>
+      </div>
+
+      <div class="card preview">
+        <h2>Preview</h2>
+        <div class="empty" id="emptyHint">Select a file to preview</div>
+        <div id="mediaHost" class="media-wrap" style="display:none"></div>
+        <iframe id="pv" style="display:none"></iframe>
+      </div>
+    </div>
     """
-    return html.strip().encode("utf-8")
+
+    # JS: sorting, filter, preview
+    js = """
+(function(){
+  const table = document.getElementById('files');
+  const tbody = table.querySelector('tbody');
+  const parentRow = tbody.querySelector('tr.parent-row');
+  const rows = Array.from(tbody.querySelectorAll('tr:not(.parent-row)'));
+  const count = document.getElementById('count');
+  const q = document.getElementById('q');
+
+  function updateCount(){
+    const visible = rows.filter(r => r.style.display !== 'none').length;
+    count.textContent = `Items: ${visible}`;
+  }
+  updateCount();
+
+  // Sorting (folders first; parent row pinned on top)
+  let sortKey = 'name'; let sortDir = 'asc';
+  function sortBy(key){
+    if (sortKey === key) sortDir = (sortDir === 'asc' ? 'desc' : 'asc');
+    else { sortKey = key; sortDir = 'asc'; }
+    const m = sortDir === 'asc' ? 1 : -1;
+    rows.sort((a,b)=>{
+      const ad = +a.dataset.isdir, bd = +b.dataset.isdir;
+      if (ad !== bd) return bd - ad; // directories first
+      if (key === 'name') return a.dataset.name.localeCompare(b.dataset.name) * m;
+      if (key === 'size') return (Number(a.dataset.size) - Number(b.dataset.size)) * m;
+      return (Number(a.dataset.ts) - Number(b.dataset.ts)) * m;
+    });
+    // Re-append with parent row first
+    if (parentRow) tbody.appendChild(parentRow);
+    rows.forEach(r => tbody.appendChild(r));
+  }
+  table.querySelectorAll('thead th').forEach(th=>{
+    th.addEventListener('click', ()=> sortBy(th.dataset.key));
+  });
+  sortBy('name');
+
+  // Filter (parent row remains visible)
+  q.addEventListener('input', ()=>{
+    const val = q.value.toLowerCase().trim();
+    rows.forEach(r=>{
+      const name = r.dataset.name.toLowerCase();
+      r.style.display = name.includes(val) ? '' : 'none';
+    });
+    updateCount();
+  });
+
+  // Preview
+  const iframe = document.getElementById('pv');
+  const media = document.getElementById('mediaHost');
+  const empty = document.getElementById('emptyHint');
+  const imgExt = ['png','jpg','jpeg','gif','webp','svg','bmp','avif'];
+  const audExt = ['mp3','wav','ogg','m4a','flac','aac','opus'];
+  const vidExt = ['mp4','webm','ogv','mov','mkv'];
+
+  function fitIframe(){
+    try{
+      const doc = iframe.contentDocument;
+      if (!doc) return;
+      const h = Math.max(
+        240,
+        Math.min(doc.documentElement.scrollHeight, Math.round(window.innerHeight * 0.9))
+      );
+      iframe.style.height = h + 'px';
+    }catch(e){ /* cross-origin safety */ }
+  }
+
+  // when loading and resizing
+  iframe.addEventListener('load', fitIframe);
+  window.addEventListener('resize', fitIframe);
+
+  function preview(href){
+    if (href.endsWith('/')) { window.location.href = href; return; }
+    empty.style.display = 'none';
+    media.style.display = 'none';
+    iframe.style.display = 'none';
+    media.innerHTML = '';
+    const ext = href.split('.').pop().toLowerCase();
+
+    if (imgExt.includes(ext)) {
+      media.innerHTML = `<img src="${href}" alt="">`;
+      media.style.display = 'block';
+    } else if (audExt.includes(ext)) {
+      media.innerHTML = `<audio controls preload="metadata" src="${href}" style="width:100%"></audio>`;
+      media.style.display = 'block';
+    } else if (vidExt.includes(ext)) {
+      media.innerHTML = `<video controls preload="metadata" src="${href}" style="width:100%"></video>`;
+      media.style.display = 'block';
+    } else {
+      iframe.src = href;
+      iframe.style.display = 'block';
+      // height will be updated on load event
+    }
+  }
+
+  tbody.addEventListener('click', (e)=>{
+    const a = e.target.closest('a.file-link');
+    if (!a) return;
+    if (e.button === 0 && !e.metaKey && !e.ctrlKey) {
+      e.preventDefault();
+      preview(a.getAttribute('href'));
+    }
+  });
+
+  // Breadcrumbs (client-side build)
+  const bc = document.getElementById('breadcrumbs');
+  const parts = window.location.pathname.split('/').filter(Boolean);
+  let accum = '';
+  const els = ['<a href="/">/</a>'];
+  parts.forEach((p)=>{
+    accum += '/' + p;
+    els.push('<span class="sep">›</span><a href="'+accum+'/">'+p+'</a>');
+  });
+  bc.innerHTML = els.join('');
+})();
+"""
+    body = table
+    html = render_page(f"Directory listing for /{rel}", body, extra_js=js)
+    return html.encode("utf-8")
+
+
+def render_page(
+    title: str, body_html: str, *, extra_css: str = "", extra_js: str = ""
+) -> str:
+    return f"""<!DOCTYPE html>
+<html lang="en" data-theme="">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>{title}</title>
+<style>
+:root {{
+  --bg: #fafafa;
+  --fg: #212121;
+  --muted: #616161;
+  --card: #ffffff;
+  --border: #e0e0e0;
+  --accent: #3f51b5;
+  --accent-2: #1e88e5;
+  --code-bg: #ffffff;
+}}
+@media (prefers-color-scheme: dark) {{
+  :root {{
+    --bg: #0e0f12;
+    --fg: #e8e8e8;
+    --muted: #9aa0a6;
+    --card: #16181d;
+    --border: #2b2f36;
+    --accent: #8ab4f8;
+    --accent-2: #8ab4f8;
+    --code-bg: #0f1115;
+  }}
+}}
+:root[data-theme="dark"] {{
+  --bg: #0e0f12;
+  --fg: #e8e8e8;
+  --muted: #9aa0a6;
+  --card: #16181d;
+  --border: #2b2f36;
+  --accent: #8ab4f8;
+  --accent-2: #8ab4f8;
+  --code-bg: #0f1115;
+}}
+
+* {{ box-sizing: border-box; }}
+html, body {{ height: 100%; }}
+body {{
+  margin: 0; padding: 0;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+  background: var(--bg); color: var(--fg);
+}}
+a {{ color: var(--accent-2); text-decoration: none; }}
+a:hover {{ text-decoration: underline; }}
+
+.container {{ max-width: 1100px; margin: 0 auto; padding: 24px 16px; }}
+
+.header {{ display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; }}
+.breadcrumbs a {{ color: var(--fg); }}
+.breadcrumbs .sep {{ margin: 0 6px; color: var(--muted); }}
+.controls {{ display: flex; gap: 8px; align-items: center; }}
+input[type="search"] {{
+  background: var(--card); color: var(--fg); border: 1px solid var(--border);
+  padding: 8px 10px; border-radius: 8px; min-width: 220px;
+}}
+.toggle {{
+  background: var(--card); color: var(--fg); border: 1px solid var(--border);
+  padding: 8px 10px; border-radius: 8px; cursor: pointer;
+}}
+
+.main {{ display: grid; grid-template-columns: 1.2fr 1fr; gap: 16px; }}
+@media (max-width: 900px) {{ .main {{ grid-template-columns: 1fr; }} }}
+
+.card {{
+  background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+  overflow: hidden;
+}}
+.card h2 {{ margin: 0; font-size: 16px; padding: 12px 14px; border-bottom: 1px solid var(--border); }}
+
+.table-wrap {{ overflow: auto; }}
+table {{ width: 100%; border-collapse: collapse; }}
+thead th {{
+  text-align: left; font-weight: 600; font-size: 14px; color: var(--muted);
+  padding: 10px 12px; border-bottom: 1px solid var(--border); cursor: pointer; white-space: nowrap;
+}}
+tbody td {{ padding: 12px; border-bottom: 1px solid var(--border); vertical-align: middle; }}
+tbody tr:hover {{ background: color-mix(in oklab, var(--card) 80%, var(--accent) 10%); }}
+
+.name-col {{ display: flex; align-items: center; gap: 10px; }}
+.icon {{ width: 18px; height: 18px; display: inline-block; vertical-align: middle; opacity: 0.9; }}
+.icon svg {{ width: 18px; height: 18px; }}
+.meta {{ color: var(--muted); font-size: 12px; }}
+
+.preview {{ min-height: 360px; }}
+.preview iframe {{ display:block; width:100%; border:0; background: var(--card); height:auto; min-height: 240px; }}
+.preview .empty {{ color: var(--muted); display:grid; place-items:center; border-top:1px solid var(--border); min-height:120px; }}
+.preview .media-wrap {{ padding:12px; background: var(--card); }}
+.preview .media-wrap img {{ max-width:100%; height:auto; display:block; }}
+.preview .media-wrap video {{ width:100%; height:auto; display:block; background:transparent; }}
+.preview .media-wrap audio {{ width:100%; display:block; }}
+
+pre code {{
+  background: var(--code-bg);
+  padding: 1em; display: block; overflow-x: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Roboto Mono", monospace;
+  border-radius: 8px; border: 1px solid var(--border); margin: 1em 0;
+}}
+
+/* Token styles used by highlight_python_code */
+span.keyword {{ color: #d81b60; font-weight: 600; }}
+span.string  {{ color: #388e3c; }}
+span.number  {{ color: #f57c00; }}
+span.comment {{ color: #9aa0a6; font-style: italic; }}
+
+hr {{ border: 0; border-top: 1px solid var(--border); margin: 16px 0; }}
+
+{extra_css}
+</style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <div class="breadcrumbs" id="breadcrumbs"></div>
+      <div class="controls">
+        <input type="search" id="q" placeholder="Search (/)">
+        <button class="toggle" id="themeToggle" title="Toggle theme">🌓</button>
+      </div>
+    </div>
+    {body_html}
+  </div>
+<script>
+(function() {{
+  // Theme toggle
+  const html = document.documentElement;
+  const key = "sfws-theme";
+  const saved = localStorage.getItem(key);
+  if (saved) html.setAttribute("data-theme", saved);
+  document.getElementById("themeToggle").addEventListener("click", () => {{
+    const cur = html.getAttribute("data-theme");
+    const next = cur === "dark" ? "" : "dark";
+    if (next) html.setAttribute("data-theme", next); else html.removeAttribute("data-theme");
+    localStorage.setItem(key, next);
+  }});
+
+  // Focus search with /
+  const q = document.getElementById("q");
+  window.addEventListener("keydown", (e) => {{
+    if (e.key === "/" && !e.metaKey && !e.ctrlKey && document.activeElement !== q) {{
+      e.preventDefault(); q.focus();
+    }}
+  }});
+}})();
+{extra_js}
+</script>
+</body>
+</html>"""
 
 
 def create_response(
