@@ -4,10 +4,11 @@ This is a simple web server that serves with a single file ⚡️
 
 ## ✨ Features
 
-- 🚀 Has no dependencies  
-- 📂 Renders HTML for folders/directories  
-- 📝 Renders Markdown  
-- ⚡️ Asynchronous  
+- 🚀 Has no dependencies
+- 📂 Renders HTML for folders/directories
+- 📝 Renders Markdown
+- ⚡️ Asynchronous
+- 🌚 Dark and 🌞 light themes
 
 ## 🛠️ How to Run
 
@@ -25,6 +26,7 @@ This is a simple web server that serves with a single file ⚡️
 
 ## 📋 TODO
 
-- 🛠️ Build binaries  
-- 🧠 Optimize render, add more markup languages  
-- 📡 Make better streams for large files  
+- 🛠️ Build binaries
+- 🧠 Optimize render, add more markup languages
+- 📡 Make better streams for large files
+- 📥 Add download availability via compressed/archive files (e.g., `.zip`, `.tar.gz`)
