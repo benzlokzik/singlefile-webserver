@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+from datetime import datetime
 import keyword
 import logging
 import mimetypes
@@ -27,6 +28,15 @@ ALLOWED_METHODS = {"GET", "HEAD"}
 BUFFER_SIZE = 1024
 MAX_HEADER_SIZE = 8192  # 8KB
 KB = 1024
+
+
+def format_size(size: int) -> str:
+    if size < KB:
+        return f"{size} B"
+    elif size < KB**2:
+        return f"{size / KB:.2f} KB"
+    else:
+        return f"{size / KB**2:.2f} MB"
 
 
 def highlight_python_code(code: str) -> str:
@@ -84,6 +94,7 @@ def render_markdown(markdown_text: str) -> str:
       - Blockquotes (lines starting with "> ")
       - Code blocks (```), with basic Python syntax highlighting if language is 'python'
     """
+
     lines = markdown_text.splitlines()
     html_lines = []
     in_code_block = False
@@ -93,7 +104,6 @@ def render_markdown(markdown_text: str) -> str:
     code_lang = ""
 
     for line in lines:
-        # Handle code block start/end.
         if line.startswith("```"):
             match = re.match(r"^```(\w+)?", line)
             lang = match.group(1).lower() if match and match.group(1) else ""
@@ -107,7 +117,7 @@ def render_markdown(markdown_text: str) -> str:
                 if code_lang == "python":
                     code_content = highlight_python_code(code_content)
                 html_lines.append(
-                    f'<pre><code class="language-{code_lang}">{code_content}</code></pre>',
+                    f'<pre><code class="language-{code_lang}">{code_content}</code></pre>'
                 )
             continue
 
@@ -115,9 +125,7 @@ def render_markdown(markdown_text: str) -> str:
             code_block.append(line)
             continue
 
-        # Detect horizontal rule (thematic break): --- *** ___ etc.
-        hr_match = re.match(r"^\s*(\*|-|_){3,}\s*$", line)
-        if hr_match:
+        if re.match(r"^\s*(\*|-|_){3,}\s*$", line):
             html_lines.append("<hr/>")
             continue
 
@@ -164,64 +172,17 @@ def render_markdown(markdown_text: str) -> str:
         html_lines.append("<ul>" + "".join(list_buffer) + "</ul>")
 
     converted = "\n".join(html_lines)
-    # CSS styles for Markdown and code highlighting.
-    style = """
-    <style>
-        /* Material-inspired fonts (uses system sans if Roboto is not loaded) */
-        body {
-            font-family: "Roboto", sans-serif;
-            background-color: #fafafa;
-            margin: 2rem;
-            color: #212121;
-        }
-        h1, h2, h3, h4, h5, h6 {
-            color: #3f51b5; /* Material Indigo */
-            margin-bottom: 0.5rem;
-        }
-        p, li, blockquote {
-            line-height: 1.6;
-        }
-        pre code {
-            background-color: #ffffff;
-            padding: 1em;
-            display: block;
-            overflow-x: auto;
-            font-family: "Roboto Mono", monospace;
-            border-radius: 4px;
-            border: 1px solid #e0e0e0;
-            margin: 1em 0;
-        }
-        a {
-            color: #1e88e5; /* Material Blue */
-            text-decoration: none;
-        }
-        a:hover {
-            text-decoration: underline;
-        }
-        blockquote {
-            border-left: 4px solid #3f51b5;
-            background-color: #e8eaf6;
-            margin: 1em 0;
-            padding: 0.5em 1em;
-            border-radius: 4px;
-            color: #3f51b5;
-        }
-        /* Syntax highlighting classes */
-        span.keyword { color: #d81b60; font-weight: 500; } /* Pink 600 */
-        span.string  { color: #388e3c; }                   /* Green 700 */
-        span.number  { color: #f57c00; }                   /* Orange 600 */
-        span.comment { color: #757575; font-style: italic;} /* Grey 600 */
-    </style>
+
+    body = f"""
+    <div class="card">
+      <h2>Markdown</h2>
+      <div style="padding:16px">{converted}</div>
+    </div>
     """
-    return (
-        "<!DOCTYPE html>"
-        "<html lang='en'>"
-        "<head><meta charset='utf-8'><title>Markdown Render</title>"
-        + style
-        + "</head><body>"
-        + converted
-        + "</body></html>"
-    )
+
+    # breadcrumbs for the file path are drawn on the directory listing side
+    # here we leave it empty but the header remains the same
+    return render_page("Markdown Render", body)
 
 
 async def read_headers(reader: asyncio.StreamReader) -> str:
@@ -306,59 +267,353 @@ def validate_path(request_path: str) -> pathlib.Path:
 
 
 def generate_directory_listing(path: pathlib.Path) -> bytes:
-    """Generate HTML directory listing."""
-    items = []
-    current_rel = path.relative_to(ROOT)
+    # breadcrumbs
+    rel = path.relative_to(ROOT) if path != ROOT else pathlib.Path("")
+    crumbs = ['<a href="/">/</a>']
+    accum = pathlib.Path("")
+    for part in rel.parts:
+        accum = accum / part
+        crumbs.append(f'<span class="sep">›</span><a href="/{accum}/">{part}</a>')
+    "".join(crumbs)
 
+    # rows
+    rows = []
+    # Parent
     if path != ROOT:
-        parent = path.parent.relative_to(ROOT)
-        items.append(f'<li><a href="/{parent}/">.. (Parent Directory)</a></li>')
+        parent_rel = path.parent.relative_to(ROOT)
+        rows.append(f"""
+          <tr data-name=".." data-size="0" data-ts="{int(path.stat().st_mtime)}" data-isdir="1">
+            <td class="name-col">
+              <span class="icon"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M10 4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H4a2 2 0 01-2-2V6a2 2 0 012-2h6z"/></svg></span>
+              <a href="/{parent_rel}/">..</a>
+              <span class="meta">Parent</span>
+            </td>
+            <td class="meta">—</td>
+            <td class="meta">—</td>
+          </tr>
+        """)
 
-    for item in sorted(path.iterdir(), key=lambda x: (not x.is_dir(), x.name)):
-        rel_path = item.relative_to(ROOT)
-        if item.is_dir():
-            items.append(f'<li><a href="/{rel_path}/">{item.name}/</a></li>')
-        else:
-            size = item.stat().st_size
-            if size < KB:
-                formatted_size = f"{size} B"
-            elif size < KB**2:
-                formatted_size = f"{size / KB:.2f} KB"
-            else:
-                formatted_size = f"{size / KB**2:.2f} MB"
-            items.append(
-                f'<li><a href="/{rel_path}">{item.name}</a> ({formatted_size})</li>',
-            )
+    for item in sorted(path.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())):
+        is_dir = item.is_dir()
+        rel_item = item.relative_to(ROOT)
+        href = f"/{rel_item}/" if is_dir else f"/{rel_item}"
+        size = item.stat().st_size if not is_dir else 0
+        mtime = int(item.stat().st_mtime)
+        size_str = "—" if is_dir else format_size(size)
+        mod_str = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+        icon = (
+            """
+          <span class="icon"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M10 4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H4a2 2 0 01-2-2V6a2 2 0 012-2h6z"/></svg></span>
+        """
+            if is_dir
+            else """
+          <span class="icon"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6zM14 3.5L18.5 8H14V3.5z"/></svg></span>
+        """
+        )
+        rows.append(f"""
+          <tr data-name="{item.name}" data-size="{size}" data-ts="{mtime}" data-isdir="{1 if is_dir else 0}">
+            <td class="name-col">{icon}<a class="file-link" href="{href}">{item.name}{'/' if is_dir else ''}</a></td>
+            <td class="meta">{size_str}</td>
+            <td class="meta">{mod_str}</td>
+          </tr>
+        """)
 
-    html = f"""
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <title>Directory listing for /{current_rel}</title>
-        <style>
-            body {{ font-family: sans-serif; margin: 2rem; }}
-            ul {{ list-style-type: none; padding: 0; }}
-            li {{ padding: 0.5rem; }}
-            a {{ color: #0366d6; text-decoration: none; }}
-            a:hover {{ text-decoration: underline; }}
-            .container {{ max-width: 800px; margin: 0 auto; }}
-            .header {{ border-bottom: 1px solid #eaecef; margin-bottom: 1rem; }}
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <div class="header">
-                <h1>Directory listing for /{current_rel}</h1>
-            </div>
-            <ul>
-                {"".join(items)}
-            </ul>
+    table = f"""
+    <div class="main">
+      <div class="card">
+        <h2>Content</h2>
+        <div class="table-wrap">
+          <table id="files">
+            <thead>
+              <tr>
+                <th data-key="name">Name</th>
+                <th data-key="size">Size</th>
+                <th data-key="ts">Modified</th>
+              </tr>
+            </thead>
+            <tbody>
+              {''.join(rows)}
+            </tbody>
+          </table>
         </div>
-    </body>
-    </html>
+        <div style="padding:10px 12px" class="meta"><span id="count"></span></div>
+      </div>
+
+      <div class="card preview">
+        <h2>Preview</h2>
+        <div class="empty" id="emptyHint">Select a file for preview</div>
+        <iframe id="pv" style="display:none"></iframe>
+      </div>
+    </div>
     """
-    return html.strip().encode("utf-8")
+
+    # JS: sorting, filter, preview
+    js = """
+(function(){
+  const table = document.getElementById('files');
+  const tbody = table.querySelector('tbody');
+  const rows = Array.from(tbody.querySelectorAll('tr'));
+  const count = document.getElementById('count');
+  const q = document.getElementById('q');
+
+  function updateCount(){
+    const visible = rows.filter(r => r.style.display !== 'none').length;
+    count.textContent = `Items: ${visible}`;
+  }
+  updateCount();
+
+  // sorting
+  let sortKey = 'isdir'; let sortDir = 'desc';
+  function sortBy(key){
+    if (sortKey === key) sortDir = (sortDir === 'asc' ? 'desc' : 'asc');
+    else { sortKey = key; sortDir = 'asc'; }
+    const m = sortDir === 'asc' ? 1 : -1;
+
+    rows.sort((a,b)=>{
+      // folders always first when sorting by name/date/size
+      const ad = +a.dataset.isdir, bd = +b.dataset.isdir;
+      if (ad !== bd) return bd - ad;
+
+      if (key === 'name'){
+        return a.dataset.name.localeCompare(b.dataset.name) * m;
+      } else if (key === 'size'){
+        return (Number(a.dataset.size) - Number(b.dataset.size)) * m;
+      } else { // ts
+        return (Number(a.dataset.ts) - Number(b.dataset.ts)) * m;
+      }
+    });
+
+    // rebuild
+    rows.forEach(r => tbody.appendChild(r));
+  }
+  table.querySelectorAll('thead th').forEach(th=>{
+    th.addEventListener('click', ()=> sortBy(th.dataset.key));
+  });
+  sortBy('name');
+
+  // filter
+  q.addEventListener('input', ()=>{
+    const val = q.value.toLowerCase().trim();
+    rows.forEach(r=>{
+      const name = r.dataset.name.toLowerCase();
+      r.style.display = name.includes(val) ? '' : 'none';
+    });
+    updateCount();
+  });
+
+  // preview
+  const iframe = document.getElementById('pv');
+  const empty = document.getElementById('emptyHint');
+  function preview(href){
+    // simple heuristics: if it's a directory — navigate; if it's a file — open in iframe
+    if (href.endsWith('/')) {{ window.location.href = href; return; }}
+    empty.style.display = 'none';
+    iframe.style.display = 'block';
+    iframe.src = href;
+  }
+
+  tbody.addEventListener('click', (e)=>{
+    const a = e.target.closest('a.file-link');
+    if (!a) return;
+    // regular click — preview, middle/ctrl/cmd — as usual
+    if (e.button === 0 && !e.metaKey && !e.ctrlKey) {{
+      e.preventDefault();
+      preview(a.getAttribute('href'));
+    }}
+  });
+
+  // don't know the breadcrumbs from server — build from location.pathname
+  const bc = document.getElementById('breadcrumbs');
+  const parts = window.location.pathname.split('/').filter(Boolean);
+  let accum = '';
+  const els = ['<a href="/">/</a>'];
+  parts.forEach((p, i)=>{
+    accum += '/' + p;
+    els.push('<span class="sep">›</span><a href="'+accum+'/">'+p+'</a>');
+  });
+  bc.innerHTML = els.join('');
+})();
+"""
+
+    body = table
+    html = render_page(f"Directory listing for /{rel}", body, extra_js=js)
+    return html.encode("utf-8")
+
+
+def render_page(
+    title: str, body_html: str, *, extra_css: str = "", extra_js: str = ""
+) -> str:
+    return f"""<!DOCTYPE html>
+<html lang="en" data-theme="">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>{title}</title>
+<style>
+:root {{
+  --bg: #fafafa;
+  --fg: #212121;
+  --muted: #616161;
+  --card: #ffffff;
+  --border: #e0e0e0;
+  --accent: #3f51b5;
+  --accent-2: #1e88e5;
+  --code-bg: #ffffff;
+}}
+@media (prefers-color-scheme: dark) {{
+  :root {{
+    --bg: #0e0f12;
+    --fg: #e8e8e8;
+    --muted: #9aa0a6;
+    --card: #16181d;
+    --border: #2b2f36;
+    --accent: #8ab4f8;
+    --accent-2: #8ab4f8;
+    --code-bg: #0f1115;
+  }}
+}}
+:root[data-theme="dark"] {{
+  --bg: #0e0f12;
+  --fg: #e8e8e8;
+  --muted: #9aa0a6;
+  --card: #16181d;
+  --border: #2b2f36;
+  --accent: #8ab4f8;
+  --accent-2: #8ab4f8;
+  --code-bg: #0f1115;
+}}
+
+* {{ box-sizing: border-box; }}
+html, body {{ height: 100%; }}
+body {{
+  margin: 0; padding: 0;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+  background: var(--bg); color: var(--fg);
+}}
+a {{ color: var(--accent-2); text-decoration: none; }}
+a:hover {{ text-decoration: underline; }}
+
+.container {{
+  max-width: 1100px; margin: 0 auto; padding: 24px 16px;
+}}
+
+.header {{
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; margin-bottom: 16px;
+}}
+.breadcrumbs a {{ color: var(--fg); }}
+.breadcrumbs span.sep {{ margin: 0 6px; color: var(--muted); }}
+.controls {{ display: flex; gap: 8px; align-items: center; }}
+input[type="search"] {{
+  background: var(--card); color: var(--fg); border: 1px solid var(--border);
+  padding: 8px 10px; border-radius: 8px; min-width: 220px;
+}}
+.toggle {{
+  background: var(--card); color: var(--fg); border: 1px solid var(--border);
+  padding: 8px 10px; border-radius: 8px; cursor: pointer;
+}}
+
+.main {{
+  display: grid; grid-template-columns: 1.2fr 1fr; gap: 16px;
+}}
+@media (max-width: 900px) {{
+  .main {{ grid-template-columns: 1fr; }}
+}}
+
+.card {{
+  background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+  overflow: hidden;
+}}
+.card h2 {{ margin: 0; font-size: 16px; padding: 12px 14px; border-bottom: 1px solid var(--border); }}
+
+.table-wrap {{ overflow: auto; }}
+table {{
+  width: 100%; border-collapse: collapse;
+}}
+thead th {{
+  text-align: left; font-weight: 600; font-size: 14px; color: var(--muted);
+  padding: 10px 12px; border-bottom: 1px solid var(--border); cursor: pointer;
+  white-space: nowrap;
+}}
+tbody td {{
+  padding: 12px; border-bottom: 1px solid var(--border); vertical-align: middle;
+}}
+tbody tr:hover {{ background: color-mix(in oklab, var(--card) 80%, var(--accent) 10%); }}
+
+.name-col {{ display: flex; align-items: center; gap: 10px; }}
+.icon {{
+  width: 18px; height: 18px; display: inline-block;
+  vertical-align: middle; opacity: 0.9;
+}}
+.icon svg {{ width: 18px; height: 18px; }}
+
+.meta {{ color: var(--muted); font-size: 12px; }}
+
+.preview {{
+  min-height: 360px;
+}}
+.preview iframe, .preview .empty {{
+  display: block; width: 100%; height: min(70vh, 720px); border: 0;
+}}
+.preview .empty {{
+  color: var(--muted); display: grid; place-items: center; border-top: 1px solid var(--border);
+}}
+
+pre code {{
+  background: var(--code-bg);
+  padding: 1em; display: block; overflow-x: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Roboto Mono", monospace;
+  border-radius: 8px; border: 1px solid var(--border); margin: 1em 0;
+}}
+
+/* Token highlighting from highlight_python_code */
+span.keyword {{ color: #d81b60; font-weight: 600; }}
+span.string  {{ color: #388e3c; }}
+span.number  {{ color: #f57c00; }}
+span.comment {{ color: #9aa0a6; font-style: italic; }}
+
+hr {{ border: 0; border-top: 1px solid var(--border); margin: 16px 0; }}
+
+{extra_css}
+</style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <div class="breadcrumbs" id="breadcrumbs"></div>
+      <div class="controls">
+        <input type="search" id="q" placeholder="Search (/)">
+        <button class="toggle" id="themeToggle" title="Toggle theme">🌓</button>
+      </div>
+    </div>
+    {body_html}
+  </div>
+<script>
+(function() {{
+  // theme toggle
+  const html = document.documentElement;
+  const key = "sfws-theme";
+  const saved = localStorage.getItem(key);
+  if (saved) html.setAttribute("data-theme", saved);
+  document.getElementById("themeToggle").addEventListener("click", () => {{
+    const cur = html.getAttribute("data-theme");
+    const next = cur === "dark" ? "" : "dark";
+    if (next) html.setAttribute("data-theme", next); else html.removeAttribute("data-theme");
+    localStorage.setItem(key, next);
+  }});
+
+  // focus search by pressing /
+  const q = document.getElementById("q");
+  window.addEventListener("keydown", (e) => {{
+    if (e.key === "/" && !e.metaKey && !e.ctrlKey && document.activeElement !== q) {{
+      e.preventDefault(); q.focus();
+    }}
+  }});
+}})();
+{extra_js}
+</script>
+</body>
+</html>"""
 
 
 def create_response(
