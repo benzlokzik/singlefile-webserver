@@ -87,23 +87,35 @@ def render_markdown(markdown_text: str) -> str:
 
     Features supported:
       - Headings (using 1-6 '#' characters)
-      - Bold (**text**) and italics (*text*)
+      - Bold/Italic (**text**, *text*)
       - Inline code (`code`)
       - Links ([text](url))
-      - Unordered lists (lines starting with "- ")
-      - Blockquotes (lines starting with "> ")
-      - Code blocks (```), with basic Python syntax highlighting if language is 'python'
+      - Reference-style links/images: [text][id], ![alt][id] with [id]: url
+      - Images ![alt](src)
+      - Image-as-link: [![alt](src)](href)
+      - Lists (- ), blockquotes (> ), code fences ```lang (python gets basic highlighting)
     """
-
+    # Collect reference-style link definitions
+    ref_links: dict[str, str] = {}
     lines = markdown_text.splitlines()
+    cleaned_lines = []
+    for line in lines:
+        m = re.match(r'^\s*\[([^\]]+)\]:\s*(\S+)', line)
+        if m:
+            ref_links[m.group(1).strip()] = m.group(2).strip()
+        else:
+            cleaned_lines.append(line)
+    lines = cleaned_lines
+
     html_lines = []
     in_code_block = False
     in_list = False
-    code_block = []
-    list_buffer = []
+    code_block: list[str] = []
+    list_buffer: list[str] = []
     code_lang = ""
 
     for line in lines:
+        # Code block start/end
         if line.startswith("```"):
             match = re.match(r"^```(\w+)?", line)
             lang = match.group(1).lower() if match and match.group(1) else ""
@@ -125,11 +137,12 @@ def render_markdown(markdown_text: str) -> str:
             code_block.append(line)
             continue
 
+        # Horizontal rule
         if re.match(r"^\s*(\*|-|_){3,}\s*$", line):
             html_lines.append("<hr/>")
             continue
 
-        # Handle headings.
+        # Headings
         header_match = re.match(r"^(#{1,6})\s+(.*)", line)
         if header_match:
             level = len(header_match.group(1))
@@ -137,7 +150,7 @@ def render_markdown(markdown_text: str) -> str:
             html_lines.append(f"<h{level}>{content}</h{level}>")
             continue
 
-        # Handle unordered list items.
+        # Unordered lists
         if line.startswith("- "):
             if not in_list:
                 in_list = True
@@ -150,13 +163,41 @@ def render_markdown(markdown_text: str) -> str:
             in_list = False
             list_buffer = []
 
-        # Handle blockquotes.
+        # Blockquotes
         if line.startswith("> "):
-            blockquote_line = line[2:].strip()
-            html_lines.append(f"<blockquote>{blockquote_line}</blockquote>")
+            html_lines.append(f"<blockquote>{line[2:].strip()}</blockquote>")
             continue
 
-        # Inline formatting: bold, italics, inline code, and links.
+        # Inline transforms — order matters
+        # Code
+        line = re.sub(r"`(.+?)`", r"<code>\1</code>", line)
+
+        # Image-as-link: [![alt](src)](href)
+        line = re.sub(
+            r"\[\s*!\[([^\]]*?)\]\(([^)]+)\)\s*\]\(([^)]+)\)",
+            r'<a href="\3"><img alt="\1" src="\2" /></a>',
+            line,
+        )
+
+        # Reference-style images/links
+        line = re.sub(
+            r"!\[([^\]]*?)\]\[([^\]]+)\]",
+            lambda m: f'<img alt="{m.group(1)}" src="{ref_links.get(m.group(2), m.group(2))}" />',
+            line,
+        )
+        line = re.sub(
+            r"\[([^\]]+)\]\[([^\]]+)\]",
+            lambda m: f'<a href="{ref_links.get(m.group(2), m.group(2))}">{m.group(1)}</a>',
+            line,
+        )
+
+        # Inline images
+        line = re.sub(r"!\[([^\]]*?)\]\(([^)]+)\)", r'<img alt="\1" src="\2" />', line)
+
+        # Inline links
+        line = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r'<a href="\2">\1</a>', line)
+
+        # Emphasis
         line = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", line)
         line = re.sub(r"\*(.+?)\*", r"<em>\1</em>", line)
         line = re.sub(r"`(.+?)`", r"<code>\1</code>", line)
@@ -167,7 +208,7 @@ def render_markdown(markdown_text: str) -> str:
         else:
             html_lines.append("")
 
-    # Flush any remaining list items.
+    # Flush any remaining list items
     if in_list:
         html_lines.append("<ul>" + "".join(list_buffer) + "</ul>")
 
@@ -267,22 +308,16 @@ def validate_path(request_path: str) -> pathlib.Path:
 
 
 def generate_directory_listing(path: pathlib.Path) -> bytes:
-    # breadcrumbs
     rel = path.relative_to(ROOT) if path != ROOT else pathlib.Path("")
-    crumbs = ['<a href="/">/</a>']
-    accum = pathlib.Path("")
-    for part in rel.parts:
-        accum = accum / part
-        crumbs.append(f'<span class="sep">›</span><a href="/{accum}/">{part}</a>')
-    "".join(crumbs)
 
-    # rows
+    # Build rows
     rows = []
-    # Parent
+
+    # Parent always on top (separate class + excluded from sorting/filter)
     if path != ROOT:
         parent_rel = path.parent.relative_to(ROOT)
         rows.append(f"""
-          <tr data-name=".." data-size="0" data-ts="{int(path.stat().st_mtime)}" data-isdir="1">
+          <tr class="parent-row" data-name=".." data-size="0" data-ts="{int(path.stat().st_mtime)}" data-isdir="1" data-parent="1">
             <td class="name-col">
               <span class="icon"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M10 4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H4a2 2 0 01-2-2V6a2 2 0 012-2h6z"/></svg></span>
               <a href="/{parent_rel}/">..</a>
@@ -301,15 +336,11 @@ def generate_directory_listing(path: pathlib.Path) -> bytes:
         mtime = int(item.stat().st_mtime)
         size_str = "—" if is_dir else format_size(size)
         mod_str = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
-        icon = (
-            """
+        icon = ("""
           <span class="icon"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M10 4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H4a2 2 0 01-2-2V6a2 2 0 012-2h6z"/></svg></span>
-        """
-            if is_dir
-            else """
+        """ if is_dir else """
           <span class="icon"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6zM14 3.5L18.5 8H14V3.5z"/></svg></span>
-        """
-        )
+        """)
         rows.append(f"""
           <tr data-name="{item.name}" data-size="{size}" data-ts="{mtime}" data-isdir="{1 if is_dir else 0}">
             <td class="name-col">{icon}<a class="file-link" href="{href}">{item.name}{'/' if is_dir else ''}</a></td>
@@ -321,7 +352,7 @@ def generate_directory_listing(path: pathlib.Path) -> bytes:
     table = f"""
     <div class="main">
       <div class="card">
-        <h2>Content</h2>
+        <h2>Contents</h2>
         <div class="table-wrap">
           <table id="files">
             <thead>
@@ -341,7 +372,8 @@ def generate_directory_listing(path: pathlib.Path) -> bytes:
 
       <div class="card preview">
         <h2>Preview</h2>
-        <div class="empty" id="emptyHint">Select a file for preview</div>
+        <div class="empty" id="emptyHint">Select a file to preview</div>
+        <div id="mediaHost" class="media-wrap" style="display:none"></div>
         <iframe id="pv" style="display:none"></iframe>
       </div>
     </div>
@@ -352,7 +384,8 @@ def generate_directory_listing(path: pathlib.Path) -> bytes:
 (function(){
   const table = document.getElementById('files');
   const tbody = table.querySelector('tbody');
-  const rows = Array.from(tbody.querySelectorAll('tr'));
+  const parentRow = tbody.querySelector('tr.parent-row');
+  const rows = Array.from(tbody.querySelectorAll('tr:not(.parent-row)'));
   const count = document.getElementById('count');
   const q = document.getElementById('q');
 
@@ -362,28 +395,21 @@ def generate_directory_listing(path: pathlib.Path) -> bytes:
   }
   updateCount();
 
-  // sorting
-  let sortKey = 'isdir'; let sortDir = 'desc';
+  // Sorting (folders first; parent row pinned on top)
+  let sortKey = 'name'; let sortDir = 'asc';
   function sortBy(key){
     if (sortKey === key) sortDir = (sortDir === 'asc' ? 'desc' : 'asc');
     else { sortKey = key; sortDir = 'asc'; }
     const m = sortDir === 'asc' ? 1 : -1;
-
     rows.sort((a,b)=>{
-      // folders always first when sorting by name/date/size
       const ad = +a.dataset.isdir, bd = +b.dataset.isdir;
-      if (ad !== bd) return bd - ad;
-
-      if (key === 'name'){
-        return a.dataset.name.localeCompare(b.dataset.name) * m;
-      } else if (key === 'size'){
-        return (Number(a.dataset.size) - Number(b.dataset.size)) * m;
-      } else { // ts
-        return (Number(a.dataset.ts) - Number(b.dataset.ts)) * m;
-      }
+      if (ad !== bd) return bd - ad; // directories first
+      if (key === 'name') return a.dataset.name.localeCompare(b.dataset.name) * m;
+      if (key === 'size') return (Number(a.dataset.size) - Number(b.dataset.size)) * m;
+      return (Number(a.dataset.ts) - Number(b.dataset.ts)) * m;
     });
-
-    // rebuild
+    // Re-append with parent row first
+    if (parentRow) tbody.appendChild(parentRow);
     rows.forEach(r => tbody.appendChild(r));
   }
   table.querySelectorAll('thead th').forEach(th=>{
@@ -391,7 +417,7 @@ def generate_directory_listing(path: pathlib.Path) -> bytes:
   });
   sortBy('name');
 
-  // filter
+  // Filter (parent row remains visible)
   q.addEventListener('input', ()=>{
     const val = q.value.toLowerCase().trim();
     rows.forEach(r=>{
@@ -401,48 +427,63 @@ def generate_directory_listing(path: pathlib.Path) -> bytes:
     updateCount();
   });
 
-  // preview
+  // Preview
   const iframe = document.getElementById('pv');
+  const media = document.getElementById('mediaHost');
   const empty = document.getElementById('emptyHint');
+  const imgExt = ['png','jpg','jpeg','gif','webp','svg','bmp','avif'];
+  const audExt = ['mp3','wav','ogg','m4a','flac','aac','opus'];
+  const vidExt = ['mp4','webm','ogv','mov','mkv'];
   function preview(href){
-    // simple heuristics: if it's a directory — navigate; if it's a file — open in iframe
-    if (href.endsWith('/')) {{ window.location.href = href; return; }}
+    if (href.endsWith('/')) { window.location.href = href; return; }
     empty.style.display = 'none';
-    iframe.style.display = 'block';
-    iframe.src = href;
+    media.style.display = 'none';
+    iframe.style.display = 'none';
+    media.innerHTML = '';
+    const ext = href.split('.').pop().toLowerCase();
+
+    if (imgExt.includes(ext)) {
+      media.innerHTML = `<img src="${href}" alt="">`;
+      media.style.display = 'block';
+    } else if (audExt.includes(ext)) {
+      media.innerHTML = `<audio controls preload="metadata" src="${href}" style="width:100%"></audio>`;
+      media.style.display = 'block';
+    } else if (vidExt.includes(ext)) {
+      media.innerHTML = `<video controls preload="metadata" src="${href}" style="width:100%;background:transparent"></video>`;
+      media.style.display = 'block';
+    } else {
+      iframe.src = href; // HTML/MD/PDF/text etc.
+      iframe.style.display = 'block';
+    }
   }
 
   tbody.addEventListener('click', (e)=>{
     const a = e.target.closest('a.file-link');
     if (!a) return;
-    // regular click — preview, middle/ctrl/cmd — as usual
-    if (e.button === 0 && !e.metaKey && !e.ctrlKey) {{
+    if (e.button === 0 && !e.metaKey && !e.ctrlKey) {
       e.preventDefault();
       preview(a.getAttribute('href'));
-    }}
+    }
   });
 
-  // don't know the breadcrumbs from server — build from location.pathname
+  // Breadcrumbs (client-side build)
   const bc = document.getElementById('breadcrumbs');
   const parts = window.location.pathname.split('/').filter(Boolean);
   let accum = '';
   const els = ['<a href="/">/</a>'];
-  parts.forEach((p, i)=>{
+  parts.forEach((p)=>{
     accum += '/' + p;
     els.push('<span class="sep">›</span><a href="'+accum+'/">'+p+'</a>');
   });
   bc.innerHTML = els.join('');
 })();
 """
-
     body = table
     html = render_page(f"Directory listing for /{rel}", body, extra_js=js)
     return html.encode("utf-8")
 
 
-def render_page(
-    title: str, body_html: str, *, extra_css: str = "", extra_js: str = ""
-) -> str:
+def render_page(title: str, body_html: str, *, extra_css: str = "", extra_js: str = "") -> str:
     return f"""<!DOCTYPE html>
 <html lang="en" data-theme="">
 <head>
@@ -493,16 +534,11 @@ body {{
 a {{ color: var(--accent-2); text-decoration: none; }}
 a:hover {{ text-decoration: underline; }}
 
-.container {{
-  max-width: 1100px; margin: 0 auto; padding: 24px 16px;
-}}
+.container {{ max-width: 1100px; margin: 0 auto; padding: 24px 16px; }}
 
-.header {{
-  display: flex; align-items: center; justify-content: space-between;
-  gap: 12px; margin-bottom: 16px;
-}}
+.header {{ display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; }}
 .breadcrumbs a {{ color: var(--fg); }}
-.breadcrumbs span.sep {{ margin: 0 6px; color: var(--muted); }}
+.breadcrumbs .sep {{ margin: 0 6px; color: var(--muted); }}
 .controls {{ display: flex; gap: 8px; align-items: center; }}
 input[type="search"] {{
   background: var(--card); color: var(--fg); border: 1px solid var(--border);
@@ -513,12 +549,8 @@ input[type="search"] {{
   padding: 8px 10px; border-radius: 8px; cursor: pointer;
 }}
 
-.main {{
-  display: grid; grid-template-columns: 1.2fr 1fr; gap: 16px;
-}}
-@media (max-width: 900px) {{
-  .main {{ grid-template-columns: 1fr; }}
-}}
+.main {{ display: grid; grid-template-columns: 1.2fr 1fr; gap: 16px; }}
+@media (max-width: 900px) {{ .main {{ grid-template-columns: 1fr; }} }}
 
 .card {{
   background: var(--card); border: 1px solid var(--border); border-radius: 12px;
@@ -527,37 +559,26 @@ input[type="search"] {{
 .card h2 {{ margin: 0; font-size: 16px; padding: 12px 14px; border-bottom: 1px solid var(--border); }}
 
 .table-wrap {{ overflow: auto; }}
-table {{
-  width: 100%; border-collapse: collapse;
-}}
+table {{ width: 100%; border-collapse: collapse; }}
 thead th {{
   text-align: left; font-weight: 600; font-size: 14px; color: var(--muted);
-  padding: 10px 12px; border-bottom: 1px solid var(--border); cursor: pointer;
-  white-space: nowrap;
+  padding: 10px 12px; border-bottom: 1px solid var(--border); cursor: pointer; white-space: nowrap;
 }}
-tbody td {{
-  padding: 12px; border-bottom: 1px solid var(--border); vertical-align: middle;
-}}
+tbody td {{ padding: 12px; border-bottom: 1px solid var(--border); vertical-align: middle; }}
 tbody tr:hover {{ background: color-mix(in oklab, var(--card) 80%, var(--accent) 10%); }}
 
 .name-col {{ display: flex; align-items: center; gap: 10px; }}
-.icon {{
-  width: 18px; height: 18px; display: inline-block;
-  vertical-align: middle; opacity: 0.9;
-}}
+.icon {{ width: 18px; height: 18px; display: inline-block; vertical-align: middle; opacity: 0.9; }}
 .icon svg {{ width: 18px; height: 18px; }}
-
 .meta {{ color: var(--muted); font-size: 12px; }}
 
-.preview {{
-  min-height: 360px;
-}}
-.preview iframe, .preview .empty {{
-  display: block; width: 100%; height: min(70vh, 720px); border: 0;
-}}
-.preview .empty {{
-  color: var(--muted); display: grid; place-items: center; border-top: 1px solid var(--border);
-}}
+.preview {{ min-height: 360px; }}
+.preview iframe {{ display:block; width:100%; height: min(70vh, 720px); border: 0; background: var(--card); }}
+.preview .empty {{ color: var(--muted); display: grid; place-items: center; border-top: 1px solid var(--border); min-height: 120px; }}
+.preview .media-wrap {{ padding: 12px; }}
+.preview .media-wrap img {{ max-width: 100%; height: auto; display: block; }}
+.preview .media-wrap video {{ width: 100%; height: auto; display: block; background: transparent; }}
+.preview .media-wrap audio {{ width: 100%; display: block; }}
 
 pre code {{
   background: var(--code-bg);
@@ -566,7 +587,7 @@ pre code {{
   border-radius: 8px; border: 1px solid var(--border); margin: 1em 0;
 }}
 
-/* Token highlighting from highlight_python_code */
+/* Token styles used by highlight_python_code */
 span.keyword {{ color: #d81b60; font-weight: 600; }}
 span.string  {{ color: #388e3c; }}
 span.number  {{ color: #f57c00; }}
@@ -590,7 +611,7 @@ hr {{ border: 0; border-top: 1px solid var(--border); margin: 16px 0; }}
   </div>
 <script>
 (function() {{
-  // theme toggle
+  // Theme toggle
   const html = document.documentElement;
   const key = "sfws-theme";
   const saved = localStorage.getItem(key);
@@ -602,7 +623,7 @@ hr {{ border: 0; border-top: 1px solid var(--border); margin: 16px 0; }}
     localStorage.setItem(key, next);
   }});
 
-  // focus search by pressing /
+  // Focus search with /
   const q = document.getElementById("q");
   window.addEventListener("keydown", (e) => {{
     if (e.key === "/" && !e.metaKey && !e.ctrlKey && document.activeElement !== q) {{
