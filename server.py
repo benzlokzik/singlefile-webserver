@@ -97,89 +97,99 @@ def render_markdown(markdown_text: str) -> str:
     """
     # Collect reference-style link definitions
     ref_links: dict[str, str] = {}
-    lines = markdown_text.splitlines()
-    cleaned_lines = []
-    for line in lines:
-        m = re.match(r'^\s*\[([^\]]+)\]:\s*(\S+)', line)
+    raw_lines = markdown_text.splitlines()
+    lines = []
+    for line in raw_lines:
+        m = re.match(r"^\s*\[([^\]]+)\]:\s*(\S+)", line)
         if m:
             ref_links[m.group(1).strip()] = m.group(2).strip()
         else:
-            cleaned_lines.append(line)
-    lines = cleaned_lines
+            lines.append(line)
 
     html_lines = []
     in_code_block = False
-    in_list = False
-    code_block: list[str] = []
-    list_buffer: list[str] = []
     code_lang = ""
+    code_block: list[str] = []
+    in_list = False
+    list_buffer: list[str] = []
+
+    fence_re = re.compile(
+        r"^\s*(```|~~~)\s*([A-Za-z0-9_+-]+)?\s*$"
+    )  # allow leading spaces + ~~~
+    fence_close_re = re.compile(r"^\s*(```|~~~)\s*$")
 
     for line in lines:
         # Code block start/end
-        if line.startswith("```"):
-            match = re.match(r"^```(\w+)?", line)
-            lang = match.group(1).lower() if match and match.group(1) else ""
-            if not in_code_block:
-                in_code_block = True
-                code_block = []
-                code_lang = lang
-            else:
-                in_code_block = False
-                code_content = "\n".join(code_block)
-                if code_lang == "python":
-                    code_content = highlight_python_code(code_content)
-                html_lines.append(
-                    f'<pre><code class="language-{code_lang}">{code_content}</code></pre>'
-                )
+        m_start = fence_re.match(line)
+        if m_start and not in_code_block:
+            in_code_block = True
+            code_lang = (m_start.group(2) or "").lower()
+            code_block = []
+            continue
+        if fence_close_re.match(line) and in_code_block:
+            in_code_block = False
+            code_content = "\n".join(code_block)
+            if code_lang == "python":
+                code_content = highlight_python_code(code_content)
+            html_lines.append(
+                f'<pre><code class="language-{code_lang}">{code_content}</code></pre>'
+            )
             continue
 
         if in_code_block:
             code_block.append(line)
             continue
 
-        # Horizontal rule
+        # horizontal rule
         if re.match(r"^\s*(\*|-|_){3,}\s*$", line):
+            if in_list:
+                html_lines.append("<ul>" + "".join(list_buffer) + "</ul>")
+                in_list = False
+                list_buffer = []
             html_lines.append("<hr/>")
             continue
 
-        # Headings
-        header_match = re.match(r"^(#{1,6})\s+(.*)", line)
-        if header_match:
-            level = len(header_match.group(1))
-            content = header_match.group(2)
-            html_lines.append(f"<h{level}>{content}</h{level}>")
+        # headings
+        m_h = re.match(r"^(#{1,6})\s+(.*)", line)
+        if m_h:
+            if in_list:
+                html_lines.append("<ul>" + "".join(list_buffer) + "</ul>")
+                in_list = False
+                list_buffer = []
+            lvl = len(m_h.group(1))
+            content = m_h.group(2)
+            html_lines.append(f"<h{lvl}>{content}</h{lvl}>")
             continue
 
-        # Unordered lists
+        # unordered lists
         if line.startswith("- "):
             if not in_list:
                 in_list = True
                 list_buffer = []
-            list_item = line[2:].strip()
-            list_buffer.append(f"<li>{list_item}</li>")
+            list_buffer.append(f"<li>{line[2:].strip()}</li>")
             continue
         if in_list:
             html_lines.append("<ul>" + "".join(list_buffer) + "</ul>")
             in_list = False
             list_buffer = []
 
-        # Blockquotes
+        # blockquotes
         if line.startswith("> "):
             html_lines.append(f"<blockquote>{line[2:].strip()}</blockquote>")
             continue
 
-        # Inline transforms — order matters
-        # Code
-        line = re.sub(r"`(.+?)`", r"<code>\1</code>", line)
+        # inline transforms — order matters
+        # code
+        line = re.sub(r"`([^`]+?)`", r"<code>\1</code>", line)
 
-        # Image-as-link: [![alt](src)](href)
+        # image-as-link: [![alt](src)](href)
         line = re.sub(
             r"\[\s*!\[([^\]]*?)\]\(([^)]+)\)\s*\]\(([^)]+)\)",
             r'<a href="\3"><img alt="\1" src="\2" /></a>',
             line,
         )
 
-        # Reference-style images/links
+        # reference-style images/links
         line = re.sub(
             r"!\[([^\]]*?)\]\[([^\]]+)\]",
             lambda m: f'<img alt="{m.group(1)}" src="{ref_links.get(m.group(2), m.group(2))}" />',
@@ -191,24 +201,20 @@ def render_markdown(markdown_text: str) -> str:
             line,
         )
 
-        # Inline images
+        # inline images / links
         line = re.sub(r"!\[([^\]]*?)\]\(([^)]+)\)", r'<img alt="\1" src="\2" />', line)
-
-        # Inline links
         line = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r'<a href="\2">\1</a>', line)
 
-        # Emphasis
+        # emphasis
         line = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", line)
         line = re.sub(r"\*(.+?)\*", r"<em>\1</em>", line)
-        line = re.sub(r"`(.+?)`", r"<code>\1</code>", line)
-        line = re.sub(r"\[(.*?)\]\((.*?)\)", r'<a href="\2">\1</a>', line)
 
         if line.strip():
             html_lines.append(f"<p>{line}</p>")
         else:
             html_lines.append("")
 
-    # Flush any remaining list items
+    # flush any remaining list items
     if in_list:
         html_lines.append("<ul>" + "".join(list_buffer) + "</ul>")
 
@@ -336,11 +342,15 @@ def generate_directory_listing(path: pathlib.Path) -> bytes:
         mtime = int(item.stat().st_mtime)
         size_str = "—" if is_dir else format_size(size)
         mod_str = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
-        icon = ("""
+        icon = (
+            """
           <span class="icon"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M10 4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H4a2 2 0 01-2-2V6a2 2 0 012-2h6z"/></svg></span>
-        """ if is_dir else """
+        """
+            if is_dir
+            else """
           <span class="icon"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6zM14 3.5L18.5 8H14V3.5z"/></svg></span>
-        """)
+        """
+        )
         rows.append(f"""
           <tr data-name="{item.name}" data-size="{size}" data-ts="{mtime}" data-isdir="{1 if is_dir else 0}">
             <td class="name-col">{icon}<a class="file-link" href="{href}">{item.name}{'/' if is_dir else ''}</a></td>
@@ -434,6 +444,23 @@ def generate_directory_listing(path: pathlib.Path) -> bytes:
   const imgExt = ['png','jpg','jpeg','gif','webp','svg','bmp','avif'];
   const audExt = ['mp3','wav','ogg','m4a','flac','aac','opus'];
   const vidExt = ['mp4','webm','ogv','mov','mkv'];
+
+  function fitIframe(){
+    try{
+      const doc = iframe.contentDocument;
+      if (!doc) return;
+      const h = Math.max(
+        240,
+        Math.min(doc.documentElement.scrollHeight, Math.round(window.innerHeight * 0.9))
+      );
+      iframe.style.height = h + 'px';
+    }catch(e){ /* cross-origin safety */ }
+  }
+
+  // when loading and resizing
+  iframe.addEventListener('load', fitIframe);
+  window.addEventListener('resize', fitIframe);
+
   function preview(href){
     if (href.endsWith('/')) { window.location.href = href; return; }
     empty.style.display = 'none';
@@ -449,11 +476,12 @@ def generate_directory_listing(path: pathlib.Path) -> bytes:
       media.innerHTML = `<audio controls preload="metadata" src="${href}" style="width:100%"></audio>`;
       media.style.display = 'block';
     } else if (vidExt.includes(ext)) {
-      media.innerHTML = `<video controls preload="metadata" src="${href}" style="width:100%;background:transparent"></video>`;
+      media.innerHTML = `<video controls preload="metadata" src="${href}" style="width:100%"></video>`;
       media.style.display = 'block';
     } else {
-      iframe.src = href; // HTML/MD/PDF/text etc.
+      iframe.src = href;
       iframe.style.display = 'block';
+      // height will be updated on load event
     }
   }
 
@@ -483,7 +511,9 @@ def generate_directory_listing(path: pathlib.Path) -> bytes:
     return html.encode("utf-8")
 
 
-def render_page(title: str, body_html: str, *, extra_css: str = "", extra_js: str = "") -> str:
+def render_page(
+    title: str, body_html: str, *, extra_css: str = "", extra_js: str = ""
+) -> str:
     return f"""<!DOCTYPE html>
 <html lang="en" data-theme="">
 <head>
@@ -573,12 +603,12 @@ tbody tr:hover {{ background: color-mix(in oklab, var(--card) 80%, var(--accent)
 .meta {{ color: var(--muted); font-size: 12px; }}
 
 .preview {{ min-height: 360px; }}
-.preview iframe {{ display:block; width:100%; height: min(70vh, 720px); border: 0; background: var(--card); }}
-.preview .empty {{ color: var(--muted); display: grid; place-items: center; border-top: 1px solid var(--border); min-height: 120px; }}
-.preview .media-wrap {{ padding: 12px; }}
-.preview .media-wrap img {{ max-width: 100%; height: auto; display: block; }}
-.preview .media-wrap video {{ width: 100%; height: auto; display: block; background: transparent; }}
-.preview .media-wrap audio {{ width: 100%; display: block; }}
+.preview iframe {{ display:block; width:100%; border:0; background: var(--card); height:auto; min-height: 240px; }}
+.preview .empty {{ color: var(--muted); display:grid; place-items:center; border-top:1px solid var(--border); min-height:120px; }}
+.preview .media-wrap {{ padding:12px; background: var(--card); }}
+.preview .media-wrap img {{ max-width:100%; height:auto; display:block; }}
+.preview .media-wrap video {{ width:100%; height:auto; display:block; background:transparent; }}
+.preview .media-wrap audio {{ width:100%; display:block; }}
 
 pre code {{
   background: var(--code-bg);
