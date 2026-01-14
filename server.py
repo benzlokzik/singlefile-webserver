@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import io
-from datetime import datetime
 import keyword
 import logging
 import mimetypes
@@ -10,6 +9,7 @@ import pathlib
 import re
 import token
 import tokenize
+from datetime import datetime
 from typing import TYPE_CHECKING
 from urllib.parse import unquote
 
@@ -33,9 +33,8 @@ KB = 1024
 def format_size(size: int) -> str:
     if size < KB:
         return f"{size} B"
-    elif size < KB**2:
+    if size < KB**2:
         return f"{size / KB:.2f} KB"
-    else:
         return f"{size / KB**2:.2f} MB"
 
 
@@ -95,6 +94,7 @@ def render_markdown(markdown_text: str) -> str:
       - Image-as-link: [![alt](src)](href)
       - Lists (- ), blockquotes (> ), code fences ```lang (python gets basic highlighting)
     """
+    try:
     # Collect reference-style link definitions
     ref_links: dict[str, str] = {}
     raw_lines = markdown_text.splitlines()
@@ -114,7 +114,7 @@ def render_markdown(markdown_text: str) -> str:
     list_buffer: list[str] = []
 
     fence_re = re.compile(
-        r"^\s*(```|~~~)\s*([A-Za-z0-9_+-]+)?\s*$"
+            r"^\s*(```|~~~)\s*([A-Za-z0-9_+-]*)\s*$",
     )  # allow leading spaces + ~~~
     fence_close_re = re.compile(r"^\s*(```|~~~)\s*$")
 
@@ -130,7 +130,11 @@ def render_markdown(markdown_text: str) -> str:
             in_code_block = False
             code_content = "\n".join(code_block)
             if code_lang == "python":
+                    try:
                 code_content = highlight_python_code(code_content)
+                    except Exception:
+                        # Fallback to plain code if highlighting fails
+                        pass
             html_lines.append(
                 f'<pre><code class="language-{code_lang}">{code_content}</code></pre>'
             )
@@ -158,6 +162,12 @@ def render_markdown(markdown_text: str) -> str:
                 list_buffer = []
             lvl = len(m_h.group(1))
             content = m_h.group(2)
+                # Only escape HTML in headings, not the markdown syntax
+                content = (
+                    content.replace("&", "&amp;")
+                    .replace("<", "&lt;")
+                    .replace(">", "&gt;")
+                )
             html_lines.append(f"<h{lvl}>{content}</h{lvl}>")
             continue
 
@@ -166,16 +176,40 @@ def render_markdown(markdown_text: str) -> str:
             if not in_list:
                 in_list = True
                 list_buffer = []
-            list_buffer.append(f"<li>{line[2:].strip()}</li>")
+                # Process markdown transformations first, then escape HTML
+                item_text = line[2:].strip()
+
+                # Apply inline markdown transformations to list items
+                # code
+                item_text = re.sub(r"`([^`]+?)`", r"<code>\1</code>", item_text)
+
+                # emphasis
+                item_text = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", item_text)
+                item_text = re.sub(r"\*(.+?)\*", r"<em>\1</em>", item_text)
+
+                # Don't escape HTML here - the markdown transformations create safe HTML
+                # and we want to preserve it
+
+                list_buffer.append(f"<li>{item_text}</li>")
             continue
-        if in_list:
+            if (
+                in_list and line.strip() and not line.startswith("  ")
+            ):  # End list if not indented
             html_lines.append("<ul>" + "".join(list_buffer) + "</ul>")
             in_list = False
             list_buffer = []
 
         # blockquotes
         if line.startswith("> "):
-            html_lines.append(f"<blockquote>{line[2:].strip()}</blockquote>")
+                # Only escape HTML in blockquotes, not the markdown syntax
+                quote_text = (
+                    line[2:]
+                    .strip()
+                    .replace("&", "&amp;")
+                    .replace("<", "&lt;")
+                    .replace(">", "&gt;")
+                )
+                html_lines.append(f"<blockquote>{quote_text}</blockquote>")
             continue
 
         # inline transforms — order matters
@@ -202,7 +236,11 @@ def render_markdown(markdown_text: str) -> str:
         )
 
         # inline images / links
-        line = re.sub(r"!\[([^\]]*?)\]\(([^)]+)\)", r'<img alt="\1" src="\2" />', line)
+            line = re.sub(
+                r"!\[([^\]]*?)\]\(([^)]+)\)",
+                r'<img alt="\1" src="\2" />',
+                line,
+            )
         line = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r'<a href="\2">\1</a>', line)
 
         # emphasis
@@ -218,6 +256,18 @@ def render_markdown(markdown_text: str) -> str:
     if in_list:
         html_lines.append("<ul>" + "".join(list_buffer) + "</ul>")
 
+        # Handle unclosed code blocks
+        if in_code_block:
+            code_content = "\n".join(code_block)
+            if code_lang == "python":
+                try:
+                    code_content = highlight_python_code(code_content)
+                except Exception:
+                    pass
+            html_lines.append(
+                f'<pre><code class="language-{code_lang}">{code_content}</code></pre>',
+            )
+
     converted = "\n".join(html_lines)
 
     body = f"""
@@ -230,6 +280,21 @@ def render_markdown(markdown_text: str) -> str:
     # breadcrumbs for the file path are drawn on the directory listing side
     # here we leave it empty but the header remains the same
     return render_page("Markdown Render", body)
+    except Exception as e:
+        # Fallback to plain text if markdown rendering fails
+        logger.warning(f"Markdown rendering failed: {e}")
+        escaped_text = (
+            markdown_text.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+        )
+        body = f"""
+        <div class="card">
+          <h2>Markdown (Rendering Failed)</h2>
+          <div style="padding:16px"><pre>{escaped_text}</pre></div>
+        </div>
+        """
+        return render_page("Markdown Render", body)
 
 
 async def read_headers(reader: asyncio.StreamReader) -> str:
@@ -353,7 +418,7 @@ def generate_directory_listing(path: pathlib.Path) -> bytes:
         )
         rows.append(f"""
           <tr data-name="{item.name}" data-size="{size}" data-ts="{mtime}" data-isdir="{1 if is_dir else 0}">
-            <td class="name-col">{icon}<a class="file-link" href="{href}">{item.name}{'/' if is_dir else ''}</a></td>
+            <td class="name-col">{icon}<a class="file-link" href="{href}">{item.name}{"/" if is_dir else ""}</a></td>
             <td class="meta">{size_str}</td>
             <td class="meta">{mod_str}</td>
           </tr>
@@ -373,7 +438,7 @@ def generate_directory_listing(path: pathlib.Path) -> bytes:
               </tr>
             </thead>
             <tbody>
-              {''.join(rows)}
+              {"".join(rows)}
             </tbody>
           </table>
         </div>
@@ -512,7 +577,11 @@ def generate_directory_listing(path: pathlib.Path) -> bytes:
 
 
 def render_page(
-    title: str, body_html: str, *, extra_css: str = "", extra_js: str = ""
+    title: str,
+    body_html: str,
+    *,
+    extra_css: str = "",
+    extra_js: str = "",
 ) -> str:
     return f"""<!DOCTYPE html>
 <html lang="en" data-theme="">
