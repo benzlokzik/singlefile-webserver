@@ -1,17 +1,20 @@
 from __future__ import annotations
 
 import asyncio
+import ctypes
+import ctypes.util
 import html
 import io
-from datetime import datetime
 import keyword
 import logging
 import mimetypes
 import pathlib
 import re
 import socket
+import sys
 import token
 import tokenize
+from datetime import datetime
 from typing import TYPE_CHECKING
 from urllib.parse import quote, unquote
 
@@ -38,10 +41,9 @@ KB = 1024
 def format_size(size: int) -> str:
     if size < KB:
         return f"{size} B"
-    elif size < KB**2:
+    if size < KB**2:
         return f"{size / KB:.2f} KB"
-    else:
-        return f"{size / KB**2:.2f} MB"
+    return f"{size / KB**2:.2f} MB"
 
 
 def highlight_python_code(code: str) -> str:
@@ -119,7 +121,7 @@ def render_markdown(markdown_text: str) -> str:
     list_buffer: list[str] = []
 
     fence_re = re.compile(
-        r"^\s*(```|~~~)\s*([A-Za-z0-9_+-]+)?\s*$"
+        r"^\s*(```|~~~)\s*([A-Za-z0-9_+-]+)?\s*$",
     )  # allow leading spaces + ~~~
     fence_close_re = re.compile(r"^\s*(```|~~~)\s*$")
 
@@ -323,7 +325,7 @@ def validate_path(request_path: str) -> pathlib.Path | None:
 
 
 def generate_directory_listing(path: pathlib.Path) -> bytes:
-    rel = path.relative_to(ROOT) if path != ROOT else pathlib.Path("")
+    rel = path.relative_to(ROOT) if path != ROOT else pathlib.Path()
 
     # Build rows
     rows = []
@@ -332,7 +334,8 @@ def generate_directory_listing(path: pathlib.Path) -> bytes:
     if path != ROOT:
         parent_rel = path.parent.relative_to(ROOT)
         parent_href = html.escape(
-            "/" + quote(str(parent_rel), safe="/") + "/", quote=True
+            "/" + quote(str(parent_rel), safe="/") + "/",
+            quote=True,
         )
         rows.append(f"""
           <tr class="parent-row" data-name=".." data-size="0" data-ts="{int(path.stat().st_mtime)}" data-isdir="1" data-parent="1">
@@ -527,7 +530,11 @@ def generate_directory_listing(path: pathlib.Path) -> bytes:
 
 
 def render_page(
-    title: str, body_html: str, *, extra_css: str = "", extra_js: str = ""
+    title: str,
+    body_html: str,
+    *,
+    extra_css: str = "",
+    extra_js: str = "",
 ) -> str:
     return f"""<!DOCTYPE html>
 <html lang="en" data-theme="">
@@ -950,9 +957,7 @@ def _network_ips() -> list[str]:
 
 
 def _ips_via_getifaddrs() -> list[str]:
-    import ctypes
-    import ctypes.util
-
+    """Use getifaddrs() via ctypes to retrieve IP addresses of active interfaces."""
     lib = ctypes.util.find_library("c")
     if not lib:
         raise OSError("libc not found")
@@ -960,8 +965,6 @@ def _ips_via_getifaddrs() -> list[str]:
 
     # sockaddr differs between BSD (macOS) and Linux:
     # BSD prepends a 1-byte sa_len field before sa_family.
-    import sys
-
     _bsd = sys.platform == "darwin" or "bsd" in sys.platform
 
     class _SockaddrBSD(ctypes.Structure):
