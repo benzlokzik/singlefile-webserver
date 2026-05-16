@@ -1,5 +1,11 @@
 # 🌐 Singlefile Web Server
 
+[![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/downloads/)
+[![Stdlib only](https://img.shields.io/badge/python-stdlib--only-2ea44f)](#-features)
+[![Single file](https://img.shields.io/badge/architecture-single--file-6f42c1)](#-singlefile-web-server)
+[![Asyncio](https://img.shields.io/badge/runtime-asyncio-222222?logo=python&logoColor=white)](#-features)
+[![License GPLv3](https://img.shields.io/badge/license-GPLv3-blue.svg)](LICENSE)
+
 This is a simple web server that serves with a single file ⚡️
 
 ## ✨ Features
