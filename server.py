@@ -8,6 +8,7 @@ import logging
 import mimetypes
 import pathlib
 import re
+import socket
 import token
 import tokenize
 from typing import TYPE_CHECKING
@@ -928,6 +929,20 @@ async def attempt_server(port: int, host: str) -> tuple[int, asyncio.AbstractSer
     return port, server
 
 
+def _print_startup_urls(host: str, port: int) -> None:
+    lines = [f"  Local:    http://localhost:{port}"]
+    if host == "0.0.0.0":
+        try:
+            ip = socket.gethostbyname(socket.gethostname())
+            if ip and ip != "127.0.0.1":
+                lines.append(f"  Network:  http://{ip}:{port}")
+        except OSError:
+            pass
+    else:
+        lines.append(f"  Network:  http://{host}:{port}")
+    print("\n" + "\n".join(lines) + "\n", flush=True)
+
+
 async def run_server_on_available_port(
     host: str = "0.0.0.0",
     ports: Iterable[int] = (9000,),
@@ -935,28 +950,26 @@ async def run_server_on_available_port(
     """Attempt to start servers on multiple ports concurrently.
     Use the first one that passes the ping tests and cancel the rest.
     """
+    # Silence per-connection INFO logs produced by self-ping health checks.
+    logging.disable(logging.INFO)
     tasks = [asyncio.create_task(attempt_server(port, host)) for port in ports]
 
     for completed in asyncio.as_completed(tasks):
         try:
             port, server = await completed
-            logger.info(
-                "Server started and passed ping tests on http://%s:%s",
-                host,
-                port,
-            )
-            # Cancel any other pending tasks.
             for task in tasks:
                 if not task.done():
                     task.cancel()
-            # Start serving on the successful server.
+            logging.disable(logging.NOTSET)
+            _print_startup_urls(host, port)
             async with server:
                 await server.serve_forever()
             return
         except Exception as e:
             logger.warning("Attempt failed: %s", e)
 
-    logger.error("No available ports found that passed ping tests. Exiting.")
+    logging.disable(logging.NOTSET)
+    logger.error("No available ports found. Exiting.")
 
 
 if __name__ == "__main__":
