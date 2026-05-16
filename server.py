@@ -25,9 +25,11 @@ logger = logging.getLogger(__name__)
 
 ROOT = pathlib.Path(__file__).parent.resolve()
 ALLOWED_METHODS = {"GET", "HEAD"}
-BUFFER_SIZE = 1024
 MAX_HEADER_SIZE = 8192  # 8KB
 FILE_CHUNK_SIZE = 64 * 1024
+# Markdown above this size is streamed verbatim instead of rendered,
+# since rendering keeps several copies of the text in memory.
+MAX_MARKDOWN_BYTES = 5 * 1024 * 1024
 KB = 1024
 
 
@@ -302,7 +304,7 @@ def parse_request(req: str) -> dict:
     }
 
 
-def validate_path(request_path: str) -> pathlib.Path:
+def validate_path(request_path: str) -> pathlib.Path | None:
     """Validate and resolve requested path against root directory."""
     try:
         requested = ROOT.joinpath(request_path.lstrip("/")).resolve()
@@ -826,7 +828,10 @@ async def handle_client(
                         response = headers + (
                             b"" if request["method"] == "HEAD" else body
                         )
-                elif resolved_path.suffix.lower() == ".md":
+                elif (
+                    resolved_path.suffix.lower() == ".md"
+                    and resolved_path.stat().st_size <= MAX_MARKDOWN_BYTES
+                ):
                     try:
                         md_text = resolved_path.read_text(encoding="utf-8")
                         rendered_html = render_markdown(md_text)
@@ -838,6 +843,7 @@ async def handle_client(
                         logger.exception("Markdown render error")
                         response = b"HTTP/1.1 500 Internal Server Error\r\n\r\n"
                     else:
+                        del md_text, rendered_html
                         headers, body = create_response(
                             request,
                             content,
