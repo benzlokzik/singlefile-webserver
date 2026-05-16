@@ -27,6 +27,7 @@ ROOT = pathlib.Path(__file__).parent.resolve()
 ALLOWED_METHODS = {"GET", "HEAD"}
 BUFFER_SIZE = 1024
 MAX_HEADER_SIZE = 8192  # 8KB
+FILE_CHUNK_SIZE = 64 * 1024
 KB = 1024
 
 
@@ -192,12 +193,16 @@ def render_markdown(markdown_text: str) -> str:
         # reference-style images/links
         line = re.sub(
             r"!\[([^\]]*?)\]\[([^\]]+)\]",
-            lambda m: f'<img alt="{m.group(1)}" src="{ref_links.get(m.group(2), m.group(2))}" />',
+            lambda m: (
+                f'<img alt="{m.group(1)}" src="{ref_links.get(m.group(2), m.group(2))}" />'
+            ),
             line,
         )
         line = re.sub(
             r"\[([^\]]+)\]\[([^\]]+)\]",
-            lambda m: f'<a href="{ref_links.get(m.group(2), m.group(2))}">{m.group(1)}</a>',
+            lambda m: (
+                f'<a href="{ref_links.get(m.group(2), m.group(2))}">{m.group(1)}</a>'
+            ),
             line,
         )
 
@@ -353,7 +358,7 @@ def generate_directory_listing(path: pathlib.Path) -> bytes:
         )
         rows.append(f"""
           <tr data-name="{item.name}" data-size="{size}" data-ts="{mtime}" data-isdir="{1 if is_dir else 0}">
-            <td class="name-col">{icon}<a class="file-link" href="{href}">{item.name}{'/' if is_dir else ''}</a></td>
+            <td class="name-col">{icon}<a class="file-link" href="{href}">{item.name}{"/" if is_dir else ""}</a></td>
             <td class="meta">{size_str}</td>
             <td class="meta">{mod_str}</td>
           </tr>
@@ -373,7 +378,7 @@ def generate_directory_listing(path: pathlib.Path) -> bytes:
               </tr>
             </thead>
             <tbody>
-              {''.join(rows)}
+              {"".join(rows)}
             </tbody>
           </table>
         </div>
@@ -706,6 +711,58 @@ def create_response(
     return f"{status_line}\r\n{header_lines}\r\n\r\n".encode(), content
 
 
+def build_file_headers(request: dict, file_size: int) -> bytes:
+    """Build response headers for a streamed file, without loading the body."""
+    mime_type, _ = mimetypes.guess_type(request["path"])
+    content_type = mime_type or "application/octet-stream"
+    if content_type.startswith("text/"):
+        content_type += "; charset=utf-8"
+
+    status_line = f"{request['version']} 200 OK"
+    headers = {
+        "Server": "AsyncFileServer/1.0",
+        "Connection": "close",
+        "X-Content-Type-Options": "nosniff",
+        "Content-Type": content_type,
+        "Content-Length": str(file_size),
+    }
+    header_lines = "\r\n".join(f"{k}: {v}" for k, v in headers.items())
+    return f"{status_line}\r\n{header_lines}\r\n\r\n".encode()
+
+
+async def serve_file(
+    writer: asyncio.StreamWriter,
+    request: dict,
+    path: pathlib.Path,
+) -> None:
+    """Stream a file to the writer in fixed-size chunks."""
+    # Open before sending headers so file errors map to proper HTTP statuses.
+    file_obj = path.open("rb")
+    try:
+        file_size = path.stat().st_size
+        writer.write(build_file_headers(request, file_size))
+        await writer.drain()
+        if request["method"] == "HEAD":
+            return
+
+        loop = asyncio.get_running_loop()
+        try:
+            while True:
+                chunk = await loop.run_in_executor(
+                    None,
+                    file_obj.read,
+                    FILE_CHUNK_SIZE,
+                )
+                if not chunk:
+                    break
+                writer.write(chunk)
+                await writer.drain()
+        except (ConnectionResetError, BrokenPipeError) as e:
+            logger.info("Client disconnected during stream: %s", e)
+    finally:
+        file_obj.close()
+
+
 async def handle_client(
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
@@ -769,37 +826,43 @@ async def handle_client(
                         response = headers + (
                             b"" if request["method"] == "HEAD" else body
                         )
-                else:
+                elif resolved_path.suffix.lower() == ".md":
                     try:
-                        # If the requested file is Markdown, render it to HTML
-                        if resolved_path.suffix.lower() == ".md":
-                            md_text = resolved_path.read_text(encoding="utf-8")
-                            rendered_html = render_markdown(md_text)
-                            content = rendered_html.encode("utf-8")
-                        else:
-                            content = resolved_path.read_bytes()
+                        md_text = resolved_path.read_text(encoding="utf-8")
+                        rendered_html = render_markdown(md_text)
+                        content = rendered_html.encode("utf-8")
                     except PermissionError as e:
                         logger.warning("Permission denied: %s", e)
                         response = b"HTTP/1.1 403 Forbidden\r\n\r\n"
                     except Exception:
-                        logger.exception("File read error")
+                        logger.exception("Markdown render error")
                         response = b"HTTP/1.1 500 Internal Server Error\r\n\r\n"
                     else:
-                        if resolved_path.suffix.lower() == ".md":
-                            headers, body = create_response(
-                                request,
-                                content,
-                                override_content_type="text/html; charset=utf-8",
-                            )
-                        else:
-                            headers, body = create_response(request, content)
+                        headers, body = create_response(
+                            request,
+                            content,
+                            override_content_type="text/html; charset=utf-8",
+                        )
                         response = headers + (
                             b"" if request["method"] == "HEAD" else body
                         )
+                else:
+                    try:
+                        await serve_file(writer, request, resolved_path)
+                        response = None
+                    except PermissionError as e:
+                        logger.warning("Permission denied: %s", e)
+                        response = b"HTTP/1.1 403 Forbidden\r\n\r\n"
+                    except FileNotFoundError:
+                        logger.warning("File disappeared: %s", resolved_path)
+                        response = b"HTTP/1.1 404 Not Found\r\n\r\n"
+                    except OSError:
+                        logger.exception("File open error")
+                        response = b"HTTP/1.1 500 Internal Server Error\r\n\r\n"
 
-        # Send response
-        writer.write(response)
-        await writer.drain()
+        if response is not None:
+            writer.write(response)
+            await writer.drain()
 
     except Exception:
         logger.exception("Error handling request")
