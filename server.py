@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import io
 from datetime import datetime
 import keyword
@@ -12,7 +13,7 @@ import socket
 import token
 import tokenize
 from typing import TYPE_CHECKING
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -330,11 +331,14 @@ def generate_directory_listing(path: pathlib.Path) -> bytes:
     # Parent always on top (separate class + excluded from sorting/filter)
     if path != ROOT:
         parent_rel = path.parent.relative_to(ROOT)
+        parent_href = html.escape(
+            "/" + quote(str(parent_rel), safe="/") + "/", quote=True
+        )
         rows.append(f"""
           <tr class="parent-row" data-name=".." data-size="0" data-ts="{int(path.stat().st_mtime)}" data-isdir="1" data-parent="1">
             <td class="name-col">
               <span class="icon"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M10 4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H4a2 2 0 01-2-2V6a2 2 0 012-2h6z"/></svg></span>
-              <a href="/{parent_rel}/">..</a>
+              <a href="{parent_href}">..</a>
               <span class="meta">Parent</span>
             </td>
             <td class="meta">—</td>
@@ -345,7 +349,10 @@ def generate_directory_listing(path: pathlib.Path) -> bytes:
     for item in sorted(path.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())):
         is_dir = item.is_dir()
         rel_item = item.relative_to(ROOT)
-        href = f"/{rel_item}/" if is_dir else f"/{rel_item}"
+        raw_href = "/" + quote(str(rel_item), safe="/") + ("/" if is_dir else "")
+        href = html.escape(raw_href, quote=True)
+        name = html.escape(item.name)
+        data_name = html.escape(item.name, quote=True)
         size = item.stat().st_size if not is_dir else 0
         mtime = int(item.stat().st_mtime)
         size_str = "—" if is_dir else format_size(size)
@@ -360,8 +367,8 @@ def generate_directory_listing(path: pathlib.Path) -> bytes:
         """
         )
         rows.append(f"""
-          <tr data-name="{item.name}" data-size="{size}" data-ts="{mtime}" data-isdir="{1 if is_dir else 0}">
-            <td class="name-col">{icon}<a class="file-link" href="{href}">{item.name}{"/" if is_dir else ""}</a></td>
+          <tr data-name="{data_name}" data-size="{size}" data-ts="{mtime}" data-isdir="{1 if is_dir else 0}">
+            <td class="name-col">{icon}<a class="file-link" href="{href}">{name}{"/" if is_dir else ""}</a></td>
             <td class="meta">{size_str}</td>
             <td class="meta">{mod_str}</td>
           </tr>
@@ -515,8 +522,8 @@ def generate_directory_listing(path: pathlib.Path) -> bytes:
 })();
 """
     body = table
-    html = render_page(f"Directory listing for /{rel}", body, extra_js=js)
-    return html.encode("utf-8")
+    page = render_page(f"Directory listing for /{rel}", body, extra_js=js)
+    return page.encode("utf-8")
 
 
 def render_page(
@@ -527,7 +534,7 @@ def render_page(
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>{title}</title>
+<title>{html.escape(title)}</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%233f51b5'><path d='M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6zM14 3.5L18.5 8H14V3.5z'/></svg>" type="image/svg+xml">
 <style>
 :root {{
