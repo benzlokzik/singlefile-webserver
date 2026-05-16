@@ -611,6 +611,7 @@ thead th {{
   padding: 10px 12px; border-bottom: 1px solid var(--border); cursor: pointer; white-space: nowrap;
 }}
 tbody td {{ padding: 12px; border-bottom: 1px solid var(--border); vertical-align: middle; }}
+tbody td:nth-child(n+2) {{ white-space: nowrap; width: 1%; }}
 tbody tr:hover {{ background: color-mix(in oklab, var(--card) 80%, var(--accent) 10%); }}
 
 .name-col {{ display: flex; align-items: center; gap: 10px; }}
