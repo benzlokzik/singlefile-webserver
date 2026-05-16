@@ -937,15 +937,110 @@ async def attempt_server(port: int, host: str) -> tuple[int, asyncio.AbstractSer
     return port, server
 
 
+def _network_ips() -> list[str]:
+    """Return IPv4 addresses of all active network interfaces.
+
+    Uses getifaddrs() via ctypes (no hardcoded addresses, no subprocess,
+    stdlib-only). Falls back to a UDP routing probe if ctypes is unavailable.
+    """
+    try:
+        return _ips_via_getifaddrs()
+    except Exception:
+        return _ips_via_udp_probe()
+
+
+def _ips_via_getifaddrs() -> list[str]:
+    import ctypes
+    import ctypes.util
+
+    lib = ctypes.util.find_library("c")
+    if not lib:
+        raise OSError("libc not found")
+    libc = ctypes.CDLL(lib)
+
+    # sockaddr differs between BSD (macOS) and Linux:
+    # BSD prepends a 1-byte sa_len field before sa_family.
+    import sys
+
+    _bsd = sys.platform == "darwin" or "bsd" in sys.platform
+
+    class _SockaddrBSD(ctypes.Structure):
+        _fields_ = [
+            ("sa_len", ctypes.c_uint8),
+            ("sa_family", ctypes.c_uint8),
+            ("sa_data", ctypes.c_char * 14),
+        ]
+
+    class _SockaddrLinux(ctypes.Structure):
+        _fields_ = [
+            ("sa_family", ctypes.c_uint16),
+            ("sa_data", ctypes.c_char * 14),
+        ]
+
+    Sockaddr = _SockaddrBSD if _bsd else _SockaddrLinux
+
+    class IfAddrs(ctypes.Structure):
+        pass
+
+    IfAddrs._fields_ = [
+        ("ifa_next", ctypes.POINTER(IfAddrs)),
+        ("ifa_name", ctypes.c_char_p),
+        ("ifa_flags", ctypes.c_uint),
+        ("ifa_addr", ctypes.POINTER(Sockaddr)),
+        ("ifa_netmask", ctypes.POINTER(Sockaddr)),
+        ("ifa_broadaddr", ctypes.POINTER(Sockaddr)),
+        ("ifa_data", ctypes.c_void_p),
+    ]
+
+    head = ctypes.POINTER(IfAddrs)()
+    if libc.getifaddrs(ctypes.byref(head)) != 0:
+        raise OSError("getifaddrs failed")
+
+    # In sockaddr_in, sin_addr sits at offset 4 from the start of the struct
+    # (sa_len/sa_family=2B + sin_port=2B on both BSD and Linux).
+    _SINADDR_OFF = 4
+
+    ips: list[str] = []
+    seen: set[str] = set()
+    cur = head
+    try:
+        while cur:
+            ifa = cur.contents
+            if ifa.ifa_addr and ifa.ifa_addr.contents.sa_family == socket.AF_INET:
+                addr = ctypes.addressof(ifa.ifa_addr.contents)
+                ip = socket.inet_ntoa(ctypes.string_at(addr + _SINADDR_OFF, 4))
+                if ip != "127.0.0.1" and ip not in seen:
+                    seen.add(ip)
+                    ips.append(ip)
+            cur = ifa.ifa_next
+    finally:
+        libc.freeifaddrs(head)
+
+    return ips
+
+
+def _ips_via_udp_probe() -> list[str]:
+    """Fallback: derive IPs from routing table via zero-packet UDP connects."""
+    seen: set[str] = set()
+    ips: list[str] = []
+    for dest in ("10.255.255.255", "172.31.255.255", "192.168.255.255"):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.connect((dest, 1))
+                ip = s.getsockname()[0]
+                if ip and ip != "127.0.0.1" and ip not in seen:
+                    seen.add(ip)
+                    ips.append(ip)
+        except OSError:
+            pass
+    return ips
+
+
 def _print_startup_urls(host: str, port: int) -> None:
     lines = [f"  Local:    http://localhost:{port}"]
     if host == "0.0.0.0":
-        try:
-            ip = socket.gethostbyname(socket.gethostname())
-            if ip and ip != "127.0.0.1":
-                lines.append(f"  Network:  http://{ip}:{port}")
-        except OSError:
-            pass
+        for ip in _network_ips():
+            lines.append(f"  Network:  http://{ip}:{port}")
     else:
         lines.append(f"  Network:  http://{host}:{port}")
     print("\n" + "\n".join(lines) + "\n", flush=True)
